@@ -1,0 +1,22 @@
+# Java / Maven
+target/
+*.class
+
+# Node / Vite frontend
+node_modules/
+dist/
+.vite/
+
+# Secrets & local env — NEVER commit
+.env
+*.env
+!.env.example
+backend/.env
+frontend/.env
+application-local.properties
+
+# IDE / OS
+.idea/
+*.iml
+.vscode/
+.DS_Store

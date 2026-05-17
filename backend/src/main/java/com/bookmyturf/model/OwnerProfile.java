@@ -1,0 +1,29 @@
+package com.bookmyturf.model;
+
+import jakarta.persistence.*;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.Setter;
+
+@Entity
+@Table(name = "owner_profiles")
+@Getter @Setter @NoArgsConstructor
+public class OwnerProfile {
+
+    @Id
+    private Long userId;
+
+    @OneToOne(fetch = FetchType.LAZY)
+    @MapsId
+    @JoinColumn(name = "user_id")
+    private User user;
+
+    @Column(nullable = false, length = 100)
+    private String name;
+
+    @Column(name = "bank_account_number", length = 30)
+    private String bankAccountNumber;
+
+    @Column(name = "ifsc_code", length = 15)
+    private String ifscCode;
+}
