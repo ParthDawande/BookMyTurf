@@ -1,0 +1,51 @@
+
+  .   ____          _            __ _ _
+ /\\ / ___'_ __ _ _(_)_ __  __ _ \ \ \ \
+( ( )\___ | '_ | '_| | '_ \/ _` | \ \ \ \
+ \\/  ___)| |_)| | | | | || (_| |  ) ) ) )
+  '  |____| .__|_| |_|_| |_\__, | / / / /
+ =========|_|==============|___/=/_/_/_/
+
+ :: Spring Boot ::                (v3.3.5)
+
+2026-05-18T19:39:17.678+05:30  INFO 6032 --- [           main] com.bookmyturf.BookMyTurfApp             : Starting BookMyTurfApp using Java 21.0.2 with PID 6032 (C:\Users\mkadu\OneDrive\Desktop\BookMyTurf\backend\target\classes started by mkadu in C:\Users\mkadu\OneDrive\Desktop\BookMyTurf\backend)
+2026-05-18T19:39:17.680+05:30  INFO 6032 --- [           main] com.bookmyturf.BookMyTurfApp             : No active profile set, falling back to 1 default profile: "default"
+2026-05-18T19:39:18.400+05:30  INFO 6032 --- [           main] .s.d.r.c.RepositoryConfigurationDelegate : Bootstrapping Spring Data JPA repositories in DEFAULT mode.
+2026-05-18T19:39:18.511+05:30  INFO 6032 --- [           main] .s.d.r.c.RepositoryConfigurationDelegate : Finished Spring Data repository scanning in 104 ms. Found 19 JPA repository interfaces.
+2026-05-18T19:39:19.035+05:30  INFO 6032 --- [           main] o.s.b.w.embedded.tomcat.TomcatWebServer  : Tomcat initialized with port 8080 (http)
+2026-05-18T19:39:19.050+05:30  INFO 6032 --- [           main] o.apache.catalina.core.StandardService   : Starting service [Tomcat]
+2026-05-18T19:39:19.050+05:30  INFO 6032 --- [           main] o.apache.catalina.core.StandardEngine    : Starting Servlet engine: [Apache Tomcat/10.1.31]
+2026-05-18T19:39:19.111+05:30  INFO 6032 --- [           main] o.a.c.c.C.[Tomcat].[localhost].[/]       : Initializing Spring embedded WebApplicationContext
+2026-05-18T19:39:19.112+05:30  INFO 6032 --- [           main] w.s.c.ServletWebServerApplicationContext : Root WebApplicationContext: initialization completed in 1389 ms
+2026-05-18T19:39:19.267+05:30  INFO 6032 --- [           main] o.hibernate.jpa.internal.util.LogHelper  : HHH000204: Processing PersistenceUnitInfo [name: default]
+2026-05-18T19:39:19.324+05:30  INFO 6032 --- [           main] org.hibernate.Version                    : HHH000412: Hibernate ORM core version 6.5.3.Final
+2026-05-18T19:39:19.357+05:30  INFO 6032 --- [           main] o.h.c.internal.RegionFactoryInitiator    : HHH000026: Second-level cache disabled
+2026-05-18T19:39:19.649+05:30  INFO 6032 --- [           main] o.s.o.j.p.SpringPersistenceUnitInfo      : No LoadTimeWeaver setup: ignoring JPA class transformer
+2026-05-18T19:39:19.677+05:30  INFO 6032 --- [           main] com.zaxxer.hikari.HikariDataSource       : HikariPool-1 - Starting...
+2026-05-18T19:39:19.828+05:30  INFO 6032 --- [           main] com.zaxxer.hikari.pool.HikariPool        : HikariPool-1 - Added connection com.mysql.cj.jdbc.ConnectionImpl@5d27b4c1
+2026-05-18T19:39:19.829+05:30  INFO 6032 --- [           main] com.zaxxer.hikari.HikariDataSource       : HikariPool-1 - Start completed.
+2026-05-18T19:39:19.879+05:30  WARN 6032 --- [           main] org.hibernate.orm.deprecation            : HHH90000025: MySQLDialect does not need to be specified explicitly using 'hibernate.dialect' (remove the property setting and it will be selected by default)
+2026-05-18T19:39:20.940+05:30  INFO 6032 --- [           main] o.h.e.t.j.p.i.JtaPlatformInitiator       : HHH000489: No JTA platform available (set 'hibernate.transaction.jta.platform' to enable JTA platform integration)
+2026-05-18T19:39:21.535+05:30  INFO 6032 --- [           main] j.LocalContainerEntityManagerFactoryBean : Initialized JPA EntityManagerFactory for persistence unit 'default'
+2026-05-18T19:39:21.851+05:30  INFO 6032 --- [           main] o.s.d.j.r.query.QueryEnhancerFactory     : Hibernate is in classpath; If applicable, HQL parser will be used.
+2026-05-18T19:39:22.504+05:30  WARN 6032 --- [           main] .s.s.UserDetailsServiceAutoConfiguration : 
+
+Using generated security password: d87d9d05-498c-4b8a-bb66-fd48b9c4481f
+
+This generated password is for development use only. Your security configuration must be updated before running your application in production.
+
+2026-05-18T19:39:22.510+05:30  INFO 6032 --- [           main] r$InitializeUserDetailsManagerConfigurer : Global AuthenticationManager configured with UserDetailsService bean with name inMemoryUserDetailsManager
+2026-05-18T19:39:22.967+05:30  INFO 6032 --- [           main] o.s.b.w.embedded.tomcat.TomcatWebServer  : Tomcat started on port 8080 (http) with context path '/'
+2026-05-18T19:39:22.975+05:30  INFO 6032 --- [           main] com.bookmyturf.BookMyTurfApp             : Started BookMyTurfApp in 5.679 seconds (process running for 6.031)
+2026-05-18T19:40:02.417+05:30  INFO 6032 --- [nio-8080-exec-3] o.a.c.c.C.[Tomcat].[localhost].[/]       : Initializing Spring DispatcherServlet 'dispatcherServlet'
+2026-05-18T19:40:02.417+05:30  INFO 6032 --- [nio-8080-exec-3] o.s.web.servlet.DispatcherServlet        : Initializing Servlet 'dispatcherServlet'
+2026-05-18T19:40:02.418+05:30  INFO 6032 --- [nio-8080-exec-3] o.s.web.servlet.DispatcherServlet        : Completed initialization in 1 ms
+2026-05-18T19:41:35.285+05:30  WARN 6032 --- [nio-8080-exec-3] o.s.s.c.bcrypt.BCryptPasswordEncoder     : Encoded password does not look like BCrypt
+2026-05-18T20:03:13.429+05:30  WARN 6032 --- [l-1 housekeeper] com.zaxxer.hikari.pool.HikariPool        : HikariPool-1 - Thread starvation or clock leap detected (housekeeper delta=8m43s784ms542µs400ns).
+[ERROR] Failed to execute goal org.springframework.boot:spring-boot-maven-plugin:3.3.5:run (default-cli) on project bookmyturf-backend: Process terminated with exit code: -1 -> [Help 1]
+[ERROR] 
+[ERROR] To see the full stack trace of the errors, re-run Maven with the -e switch.
+[ERROR] Re-run Maven using the -X switch to enable full debug logging.
+[ERROR] 
+[ERROR] For more information about the errors and possible solutions, please read the following articles:
+[ERROR] [Help 1] http://cwiki.apache.org/confluence/display/MAVEN/MojoExecutionException

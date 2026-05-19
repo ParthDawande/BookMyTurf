@@ -1,0 +1,39 @@
+package com.bookmyturf.controller;
+
+import com.bookmyturf.dto.customer.ConfirmBookingRequest;
+import com.bookmyturf.dto.customer.ConfirmBookingResponse;
+import com.bookmyturf.dto.customer.InitiateBookingRequest;
+import com.bookmyturf.dto.customer.InitiateBookingResponse;
+import com.bookmyturf.model.User;
+import com.bookmyturf.service.BookingService;
+import jakarta.validation.Valid;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequestMapping("/api/customer/bookings")
+public class BookingController {
+
+    private final BookingService bookingService;
+
+    public BookingController(BookingService bookingService) {
+        this.bookingService = bookingService;
+    }
+
+    @PostMapping("/initiate")
+    public ResponseEntity<InitiateBookingResponse> initiate(
+            @AuthenticationPrincipal User user,
+            @Valid @RequestBody InitiateBookingRequest req) {
+        return ResponseEntity.ok(bookingService.initiate(user, req));
+    }
+
+    @PostMapping("/confirm")
+    public ResponseEntity<ConfirmBookingResponse> confirm(
+            @AuthenticationPrincipal User user,
+            @Valid @RequestBody ConfirmBookingRequest req) {
+        return ResponseEntity.status(HttpStatus.CREATED)
+                .body(bookingService.confirm(user, req));
+    }
+}

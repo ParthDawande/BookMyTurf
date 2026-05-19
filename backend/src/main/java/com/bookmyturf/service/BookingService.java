@@ -1,0 +1,415 @@
+package com.bookmyturf.service;
+
+import com.bookmyturf.dto.customer.ConfirmBookingRequest;
+import com.bookmyturf.dto.customer.ConfirmBookingResponse;
+import com.bookmyturf.dto.customer.InitiateBookingRequest;
+import com.bookmyturf.dto.customer.InitiateBookingResponse;
+import com.bookmyturf.model.*;
+import com.bookmyturf.repository.*;
+import com.razorpay.Order;
+import com.razorpay.RazorpayClient;
+import com.razorpay.RazorpayException;
+import com.razorpay.Utils;
+import org.json.JSONObject;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpStatus;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.server.ResponseStatusException;
+
+import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
+import java.util.*;
+import java.util.stream.Collectors;
+
+@Service
+@Transactional(readOnly = true)
+public class BookingService {
+
+    private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("HH:mm");
+    private static final int BOOKING_HORIZON_DAYS = 90;
+
+    private final SubCourtRepository subCourtRepository;
+    private final BookingRepository bookingRepository;
+    private final BookingSlotRepository bookingSlotRepository;
+    private final PaymentRepository paymentRepository;
+    private final PayoutRepository payoutRepository;
+    private final NotificationRepository notificationRepository;
+    private final RazorpayClient razorpayClient;
+
+    @Value("${app.razorpay.key-id}")
+    private String razorpayKeyId;
+
+    @Value("${app.razorpay.key-secret}")
+    private String razorpayKeySecret;
+
+    // Read from config — DECISIONS.md §1: never hardcode 0.10 in business logic.
+    @Value("${app.platform.commission-rate}")
+    private BigDecimal commissionRate;
+
+    // Read from config — DECISIONS.md §2: independent property, not collapsed with others.
+    @Value("${app.payout.hold-hours}")
+    private int payoutHoldHours;
+
+    public BookingService(SubCourtRepository subCourtRepository,
+                          BookingRepository bookingRepository,
+                          BookingSlotRepository bookingSlotRepository,
+                          PaymentRepository paymentRepository,
+                          PayoutRepository payoutRepository,
+                          NotificationRepository notificationRepository,
+                          RazorpayClient razorpayClient) {
+        this.subCourtRepository = subCourtRepository;
+        this.bookingRepository = bookingRepository;
+        this.bookingSlotRepository = bookingSlotRepository;
+        this.paymentRepository = paymentRepository;
+        this.payoutRepository = payoutRepository;
+        this.notificationRepository = notificationRepository;
+        this.razorpayClient = razorpayClient;
+    }
+
+    // -------------------------------------------------------------------------
+    // Endpoint 1: initiate — validate + create Razorpay order (no DB writes)
+    // -------------------------------------------------------------------------
+
+    public InitiateBookingResponse initiate(User customer, InitiateBookingRequest req) {
+        // 1. Parse and range-check booking date.
+        LocalDate bookingDate = parseDate(req.bookingDate(), "Invalid booking date");
+        LocalDate today = LocalDate.now();
+        if (bookingDate.isBefore(today) || bookingDate.isAfter(today.plusDays(BOOKING_HORIZON_DAYS))) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid booking date");
+        }
+
+        // 2. Fetch sub-court: must be APPROVED, turf APPROVED, owner ACTIVE — same
+        //    discoverability rule used in 5A. Non-matching → 404 (no leak of existence).
+        SubCourt sc = subCourtRepository.findBookableById(req.subCourtId())
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND,
+                        "Sub-court not available for booking"));
+
+        // 3. Parse and validate requested slots (hourly, within operating hours, contiguous).
+        List<LocalTime[]> parsedSlots = parseAndValidateSlots(req.slots(), sc);
+
+        // 4. Slot availability check — reuse 5A's status-derived rule (CONFIRMED + COMPLETED
+        //    block the slot; CANCELLED + REFUNDED free it).
+        Set<LocalTime> takenStarts = new HashSet<>(bookingSlotRepository.findTakenSlotStartTimes(
+                sc.getId(), bookingDate,
+                List.of(BookingStatus.CONFIRMED, BookingStatus.COMPLETED)));
+
+        List<String> unavailable = parsedSlots.stream()
+                .filter(s -> takenStarts.contains(s[0]))
+                .map(s -> TIME_FMT.format(s[0]) + "-" + TIME_FMT.format(s[1]))
+                .collect(Collectors.toList());
+        if (!unavailable.isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "One or more slots are no longer available");
+        }
+
+        // 5. Compute total server-side from the DB price — never trust a client-supplied amount.
+        BigDecimal rate = sc.getHourlyPrice();
+        BigDecimal total = rate.multiply(BigDecimal.valueOf(parsedSlots.size()));
+
+        // 6. Encode slots compactly for Razorpay notes (Razorpay limits note values to 256 chars).
+        //    Format: "HH:mm-HH:mm" per slot, pipe-delimited across slots.
+        String slotsEncoded = parsedSlots.stream()
+                .map(s -> TIME_FMT.format(s[0]) + "-" + TIME_FMT.format(s[1]))
+                .collect(Collectors.joining("|"));
+
+        JSONObject notes = new JSONObject();
+        notes.put("customer_id", customer.getId().toString());
+        notes.put("sub_court_id", sc.getId().toString());
+        notes.put("booking_date", bookingDate.toString());
+        notes.put("slots_json", slotsEncoded);
+        notes.put("total_amount", total.toPlainString());
+        notes.put("rate_at_booking", rate.toPlainString());
+
+        JSONObject orderRequest = new JSONObject();
+        // Razorpay amount is in paise (integer).
+        orderRequest.put("amount", total.multiply(BigDecimal.valueOf(100)).longValue());
+        orderRequest.put("currency", "INR");
+        orderRequest.put("receipt", "init_" + customer.getId() + "_" + System.currentTimeMillis());
+        orderRequest.put("notes", notes);
+
+        Order rzpOrder;
+        try {
+            rzpOrder = razorpayClient.orders.create(orderRequest);
+        } catch (RazorpayException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_GATEWAY,
+                    "Unable to create payment order. Please try again.");
+        }
+
+        String orderId = rzpOrder.get("id");
+
+        // 7. Build response — include rate_at_booking on each slot (price-freezing confirmation).
+        List<InitiateBookingResponse.SlotWithRate> responseSlots = parsedSlots.stream()
+                .map(s -> new InitiateBookingResponse.SlotWithRate(
+                        TIME_FMT.format(s[0]), TIME_FMT.format(s[1]), rate))
+                .collect(Collectors.toList());
+
+        return new InitiateBookingResponse(
+                sc.getId(),
+                sc.getName(),
+                sc.getTurf().getName(),
+                bookingDate.toString(),
+                responseSlots,
+                total,
+                orderId,
+                razorpayKeyId
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Endpoint 2: confirm — verify payment, create all rows (happy path only — 5B)
+    // -------------------------------------------------------------------------
+
+    @Transactional
+    public ConfirmBookingResponse confirm(User customer, ConfirmBookingRequest req) {
+
+        // 1. Signature verification — FIRST check, before any DB read or lock.
+        //    A forged/tampered request is rejected here and nothing else executes.
+        //    No refund/capture attempted on a failed signature (5C-2/3 concern).
+        try {
+            JSONObject sigAttrs = new JSONObject();
+            sigAttrs.put("razorpay_order_id", req.razorpayOrderId());
+            sigAttrs.put("razorpay_payment_id", req.razorpayPaymentId());
+            sigAttrs.put("razorpay_signature", req.razorpaySignature());
+            boolean valid = Utils.verifyPaymentSignature(sigAttrs, razorpayKeySecret);
+            if (!valid) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Payment verification failed");
+            }
+        } catch (ResponseStatusException rse) {
+            throw rse;
+        } catch (RazorpayException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Payment verification failed");
+        }
+
+        // 2. Re-fetch the Razorpay order and read notes.
+        //    Do NOT trust client for amount or slots — the notes are the authoritative source.
+        Order rzpOrder;
+        try {
+            rzpOrder = razorpayClient.orders.fetch(req.razorpayOrderId());
+        } catch (RazorpayException e) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Order not found");
+        }
+
+        long subCourtId;
+        LocalDate bookingDate;
+        BigDecimal totalAmount;
+        BigDecimal rateAtBooking;
+        List<LocalTime[]> slots;
+        try {
+            JSONObject notes = (JSONObject) rzpOrder.get("notes");
+            if (notes == null || !notes.has("sub_court_id")) {
+                throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Order not found");
+            }
+
+            long notesCustomerId = Long.parseLong(notes.getString("customer_id"));
+            if (notesCustomerId != customer.getId()) {
+                // Payment made by a different customer — reject without revealing reason.
+                throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Forbidden");
+            }
+
+            subCourtId = Long.parseLong(notes.getString("sub_court_id"));
+            bookingDate = LocalDate.parse(notes.getString("booking_date"));
+            totalAmount = new BigDecimal(notes.getString("total_amount"));
+            rateAtBooking = new BigDecimal(notes.getString("rate_at_booking"));
+            slots = decodeSlotsEncoded(notes.getString("slots_json"));
+        } catch (ResponseStatusException rse) {
+            throw rse;
+        } catch (Exception e) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Order not found");
+        }
+
+        LocalTime lastSlotEnd = slots.get(slots.size() - 1)[1];
+
+        // 3. Acquire a pessimistic WRITE lock on the sub_courts row.
+        //    This serialises concurrent confirms for the SAME sub-court;
+        //    different sub-courts proceed in parallel.
+        SubCourt sc = subCourtRepository.findByIdForUpdate(subCourtId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "Sub-court no longer available"));
+
+        // 4. Verify sub-court and its turf are still discoverable (happy path: they are).
+        //    If not, 400 placeholder — 5C adds refund/rollback around this.
+        if (sc.getStatus() != ListingStatus.APPROVED
+                || sc.getTurf().getStatus() != ListingStatus.APPROVED
+                || sc.getTurf().getOwner().getStatus() != UserStatus.ACTIVE) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Sub-court no longer available");
+        }
+
+        // 5. Race re-check — executes AFTER the SELECT FOR UPDATE lock (step 3) so
+        //    concurrent confirms for this sub-court are serialized here.
+        //    Same status-derived rule as 5A/5B: CONFIRMED + COMPLETED block the slot.
+        Set<LocalTime> takenStarts = new HashSet<>(bookingSlotRepository.findTakenSlotStartTimes(
+                sc.getId(), bookingDate,
+                List.of(BookingStatus.CONFIRMED, BookingStatus.COMPLETED)));
+        boolean anyTaken = slots.stream().anyMatch(s -> takenStarts.contains(s[0]));
+        if (anyTaken) {
+            // 5C-2a: race detected, refund deferred to 5C-2b — payment intentionally not yet refunded here.
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Selected slot is no longer available");
+        }
+
+        // 6. Commission — DECISIONS.md §1: read from config property, HALF_UP, 2 decimal places.
+        BigDecimal commissionAmount = totalAmount.multiply(commissionRate)
+                .setScale(2, RoundingMode.HALF_UP);
+        BigDecimal ownerPayout = totalAmount.subtract(commissionAmount);
+
+        // 7a. Insert booking.
+        Booking booking = new Booking();
+        booking.setCustomer(customer);
+        booking.setSubCourt(sc);
+        booking.setBookingDate(bookingDate);
+        booking.setTotalAmount(totalAmount);
+        booking.setCommissionAmount(commissionAmount);
+        booking.setStatus(BookingStatus.CONFIRMED);
+        booking = bookingRepository.save(booking);
+
+        // 7b. Insert booking_slots — one per slot.
+        //     Each row carries the denormalized sub_court_id and booking_date (required by the
+        //     Phase 1 unique-constraint backstop on uq_active_slot).
+        //     slot_active = 1: this CONFIRMED booking holds the slot (NOT null).
+        for (LocalTime[] slot : slots) {
+            BookingSlot bs = new BookingSlot();
+            bs.setBooking(booking);
+            bs.setStartTime(slot[0]);
+            bs.setEndTime(slot[1]);
+            bs.setRateAtBooking(rateAtBooking);
+            bs.setSubCourt(sc);          // denormalized — needed by uq_active_slot index
+            bs.setBookingDate(bookingDate); // denormalized — needed by uq_active_slot index
+            bs.setSlotActive(1);          // 1 = active (CONFIRMED); null = freed (5C sets null on cancel)
+            bookingSlotRepository.save(bs);
+        }
+
+        // 7c. Insert payment.
+        String paymentMethod = fetchRazorpayPaymentMethod(req.razorpayPaymentId());
+        Payment payment = new Payment();
+        payment.setBooking(booking);
+        payment.setAmount(totalAmount);
+        payment.setGatewayTransactionId(req.razorpayPaymentId());
+        payment.setStatus(PaymentStatus.SUCCESS);
+        payment.setPaymentMethod(paymentMethod); // stored AS-IS from Razorpay varchar — 5C hardens mapping
+        payment = paymentRepository.save(payment);
+
+        // 7d. Insert payout for the owner.
+        //     scheduled_at = booking_date at last_slot_end_time PLUS hold hours (config).
+        //
+        //     Midnight assumption: OwnerService enforces closingHour.isAfter(openingHour) at
+        //     sub-court creation, which means closingHour > openingHour in LocalTime ordering.
+        //     Therefore no slot can have end_time = 00:00 or span midnight — the latest valid
+        //     closing is 23:59. scheduled_at is always a time AFTER the game ends.
+        LocalDateTime gameEnd = bookingDate.atTime(lastSlotEnd);
+        LocalDateTime scheduledAt = gameEnd.plusHours(payoutHoldHours);
+
+        Payout payout = new Payout();
+        payout.setOwner(sc.getTurf().getOwner());
+        payout.setBooking(booking);
+        payout.setAmount(ownerPayout);
+        payout.setStatus(PayoutStatus.PENDING);
+        payout.setScheduledAt(scheduledAt);
+        payoutRepository.save(payout);
+
+        // 8. Emit owner-directed NEW_BOOKING notification.
+        //    DECISIONS.md §5: owner-directed ONLY; NO customer-facing notification of any kind.
+        Notification notification = new Notification();
+        notification.setUser(sc.getTurf().getOwner());
+        notification.setType("NEW_BOOKING");
+        notification.setMessage("New booking for " + sc.getTurf().getName()
+                + " (" + sc.getName() + ") on " + bookingDate);
+        notificationRepository.save(notification);
+
+        // 9. Build and return response.
+        List<ConfirmBookingResponse.SlotWithRate> responseSlots = slots.stream()
+                .map(s -> new ConfirmBookingResponse.SlotWithRate(
+                        TIME_FMT.format(s[0]), TIME_FMT.format(s[1]), rateAtBooking))
+                .collect(Collectors.toList());
+
+        return new ConfirmBookingResponse(
+                booking.getId(),
+                booking.getStatus().name(),
+                sc.getId(),
+                sc.getName(),
+                sc.getTurf().getName(),
+                bookingDate.toString(),
+                responseSlots,
+                totalAmount,
+                payment.getId(),
+                req.razorpayPaymentId(),
+                booking.getCreatedAt() != null ? booking.getCreatedAt().toString() : null
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Private helpers
+    // -------------------------------------------------------------------------
+
+    private LocalDate parseDate(String dateStr, String errorMsg) {
+        try {
+            return LocalDate.parse(dateStr);
+        } catch (DateTimeParseException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, errorMsg);
+        }
+    }
+
+    private List<LocalTime[]> parseAndValidateSlots(
+            List<InitiateBookingRequest.SlotRequest> reqSlots, SubCourt sc) {
+        List<LocalTime[]> parsed = new ArrayList<>();
+        for (InitiateBookingRequest.SlotRequest sr : reqSlots) {
+            LocalTime start, end;
+            try {
+                start = LocalTime.parse(sr.startTime(), TIME_FMT);
+                end = LocalTime.parse(sr.endTime(), TIME_FMT);
+            } catch (DateTimeParseException e) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid slot configuration");
+            }
+            if (!end.equals(start.plusHours(1))) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid slot configuration");
+            }
+            if (start.isBefore(sc.getOpeningHour()) || end.isAfter(sc.getClosingHour())) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid slot configuration");
+            }
+            parsed.add(new LocalTime[]{start, end});
+        }
+
+        parsed.sort(Comparator.comparing(s -> s[0]));
+
+        // Verify contiguity: each slot must immediately follow the previous one.
+        for (int i = 1; i < parsed.size(); i++) {
+            if (!parsed.get(i)[0].equals(parsed.get(i - 1)[1])) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid slot configuration");
+            }
+        }
+        return parsed;
+    }
+
+    // Decode the compact pipe-delimited slot string stored in Razorpay notes.
+    // Format: "HH:mm-HH:mm|HH:mm-HH:mm|..."
+    private List<LocalTime[]> decodeSlotsEncoded(String encoded) {
+        List<LocalTime[]> slots = new ArrayList<>();
+        for (String part : encoded.split("\\|")) {
+            // split("-", 2) guards against any future format change that adds extra dashes.
+            String[] times = part.split("-", 2);
+            LocalTime start = LocalTime.parse(times[0], TIME_FMT);
+            LocalTime end = LocalTime.parse(times[1], TIME_FMT);
+            slots.add(new LocalTime[]{start, end});
+        }
+        slots.sort(Comparator.comparing(s -> s[0]));
+        return slots;
+    }
+
+    // Fetch the Razorpay payment method string and store it AS-IS in the varchar column.
+    // 5B happy path: payment exists; any API failure stores null (5C hardens the mapping).
+    private String fetchRazorpayPaymentMethod(String razorpayPaymentId) {
+        try {
+            com.razorpay.Payment rzpPayment = razorpayClient.payments.fetch(razorpayPaymentId);
+            Object method = rzpPayment.get("method");
+            return method != null ? method.toString() : null;
+        } catch (RazorpayException e) {
+            return null;
+        }
+    }
+}

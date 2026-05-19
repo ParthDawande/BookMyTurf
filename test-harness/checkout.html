@@ -1,0 +1,109 @@
+<!--
+  PHASE-5B/5C TEST HARNESS — DELETE AT PHASE 9
+  Two-section: Section 1 = race-test order, Section 2 = regression order.
+  Complete Section 1 first, note the 3 values, then complete Section 2.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Phase-5C-2a Checkout Harness</title>
+  <style>
+    body { font-family: monospace; max-width: 720px; margin: 40px auto; padding: 0 16px; background: #0f0f0f; color: #e0e0e0; }
+    h2 { color: #ff9800; }
+    h3 { color: #90caf9; border-top: 1px solid #333; padding-top: 16px; }
+    label { display: block; margin-top: 12px; font-size: 13px; color: #aaa; }
+    input { width: 100%; padding: 8px; margin-top: 4px; background: #1e1e1e; color: #fff; border: 1px solid #444; border-radius: 4px; font-family: monospace; font-size: 14px; box-sizing: border-box; }
+    button { margin-top: 16px; padding: 10px 24px; background: #ff9800; color: #000; font-weight: bold; border: none; border-radius: 4px; cursor: pointer; font-size: 15px; }
+    button:hover { background: #ffc14d; }
+    .result { margin-top: 20px; display: none; }
+    .result h4 { color: #4caf50; }
+    .val-box { background: #1a2a1a; border: 1px solid #4caf50; border-radius: 4px; padding: 10px 14px; font-size: 13px; line-height: 1.8; word-break: break-all; }
+    .val-box span { color: #aaa; display: inline-block; width: 220px; }
+    .note { background: #1e1e1e; border: 1px solid #555; border-radius: 4px; padding: 10px 14px; margin-top: 14px; font-size: 13px; line-height: 1.8; }
+    .note strong { color: #ff9800; }
+  </style>
+</head>
+<body>
+
+<h2>Phase-5C-2a Checkout Harness</h2>
+<p style="color:#888;font-size:13px;">Complete Section 1 first, copy the 3 values. Then complete Section 2, copy those 3 values. Provide all 6 to Claude.</p>
+
+<div class="note">
+  <strong>Payment method:</strong> Net Banking → pick any bank → click Success on the mock bank page.<br>
+  (Cards showing "international not supported" — use Net Banking.)
+</div>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<h3>Section 1 — Race-Test Order (2026-05-28, 18:00–20:00)</h3>
+<p style="color:#888;font-size:12px;">Complete this payment but DO NOT call /confirm — I will handle the race injection and confirm call.</p>
+
+<label>Key ID</label>
+<input id="keyId1" value="rzp_test_SrDuAgjwbGaeOl" />
+<label>Order ID</label>
+<input id="orderId1" value="order_SrJFEDcrRVKGT7" />
+<label>Amount (paise)</label>
+<input id="amount1" type="number" value="120000" />
+<label>Name</label><input id="name1" value="Test Cust" />
+<label>Email</label><input id="email1" value="cust.p3@example.com" />
+<label>Phone</label><input id="phone1" value="9876543297" />
+
+<button onclick="pay(1)">Pay — Section 1</button>
+
+<div class="result" id="result1">
+  <h4>✓ Section 1 payment done — copy these values</h4>
+  <div class="val-box" id="vals1"></div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<h3>Section 2 — Regression Order (2026-05-30, 18:00–20:00)</h3>
+<p style="color:#888;font-size:12px;">Complete this after Section 1. This is the clean happy-path booking.</p>
+
+<label>Key ID</label>
+<input id="keyId2" value="rzp_test_SrDuAgjwbGaeOl" />
+<label>Order ID</label>
+<input id="orderId2" value="order_SrJFEPLIPQ7euv" />
+<label>Amount (paise)</label>
+<input id="amount2" type="number" value="120000" />
+<label>Name</label><input id="name2" value="Test Cust" />
+<label>Email</label><input id="email2" value="cust.p3@example.com" />
+<label>Phone</label><input id="phone2" value="9876543297" />
+
+<button onclick="pay(2)">Pay — Section 2</button>
+
+<div class="result" id="result2">
+  <h4>✓ Section 2 payment done — copy these values</h4>
+  <div class="val-box" id="vals2"></div>
+</div>
+
+<script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+<script>
+function pay(n) {
+  const options = {
+    key:      document.getElementById('keyId'+n).value.trim(),
+    amount:   parseInt(document.getElementById('amount'+n).value),
+    currency: 'INR',
+    order_id: document.getElementById('orderId'+n).value.trim(),
+    name:     'BookMyTurf',
+    description: 'Phase-5C-2a Test (Section ' + n + ')',
+    prefill: {
+      name:    document.getElementById('name'+n).value.trim(),
+      email:   document.getElementById('email'+n).value.trim(),
+      contact: document.getElementById('phone'+n).value.trim()
+    },
+    theme: { color: '#ff9800' },
+    handler: function(r) {
+      document.getElementById('result'+n).style.display = 'block';
+      document.getElementById('vals'+n).innerHTML =
+        '<span>razorpay_payment_id:</span> ' + r.razorpay_payment_id + '<br>' +
+        '<span>razorpay_order_id:</span>   ' + r.razorpay_order_id   + '<br>' +
+        '<span>razorpay_signature:</span>  ' + r.razorpay_signature;
+    }
+  };
+  const rzp = new Razorpay(options);
+  rzp.on('payment.failed', function(r) { alert('Failed: ' + r.error.description); });
+  rzp.open();
+}
+</script>
+</body>
+</html>

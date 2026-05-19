@@ -1,23 +1,22 @@
-package com.bookmyturf.dto.owner;
+package com.bookmyturf.dto.customer;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 
 import java.math.BigDecimal;
 import java.util.List;
 
+// cover_photo_url is ALWAYS present (key is never omitted, value may be null) — DECISIONS §6.
+// Wire shape matches /api/owner/turfs list so one frontend component serves all three lists.
 @JsonInclude(JsonInclude.Include.NON_NULL)
-public record TurfSummary(
+public record CustomerTurfSummary(
         Long turfId,
         String name,
         String city,
         String address,
         @JsonInclude(JsonInclude.Include.ALWAYS) String coverPhotoUrl,
         List<String> sports,
-        Integer subCourtCount,
         BigDecimal minHourlyPrice,
         BigDecimal maxHourlyPrice,
-        String status,
         BigDecimal avgRating,
-        Integer reviewCount,
-        String createdAt
+        Integer reviewCount
 ) {}

@@ -306,10 +306,11 @@ public class OwnerService {
         List<SubCourt> subCourts = subCourtRepository.findByTurfIdOrdered(turfId);
         if (!subCourts.isEmpty()) {
             List<Long> ids = subCourts.stream().map(SubCourt::getId).collect(Collectors.toList());
-            // Phase 5: narrow this guard to block deletion only for CONFIRMED
-            // (and possibly COMPLETED) bookings. CANCELLED/REFUNDED must NOT block
-            // deletion per DECISIONS.md §3 (they are terminal/dead states).
-            if (bookingRepository.countBySubCourtIdIn(ids) > 0) {
+            // Contract B (DECISIONS.md §3): block only CONFIRMED or COMPLETED bookings.
+            // CANCELLED and REFUNDED are terminal dead states — they must NOT block deletion.
+            // COMPLETED must block because it underpins receipts, revenue, and payout history.
+            List<BookingStatus> blockingStatuses = List.of(BookingStatus.CONFIRMED, BookingStatus.COMPLETED);
+            if (bookingRepository.countBySubCourtIdInAndStatusIn(ids, blockingStatuses) > 0) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
                         "Cannot delete turf with existing bookings");
             }
@@ -428,10 +429,11 @@ public class OwnerService {
     public void deleteSubCourt(User owner, Long subCourtId) {
         SubCourt sc = resolveOwnedSubCourt(subCourtId, owner.getId());
 
-        // Phase 5: narrow this guard to block deletion only for CONFIRMED
-        // (and possibly COMPLETED) bookings. CANCELLED/REFUNDED must NOT block
-        // deletion per DECISIONS.md §3 (they are terminal/dead states).
-        if (bookingRepository.countBySubCourtId(subCourtId) > 0) {
+        // Contract B (DECISIONS.md §3): block only CONFIRMED or COMPLETED bookings.
+        // CANCELLED and REFUNDED are terminal dead states — they must NOT block deletion.
+        // COMPLETED must block because it underpins receipts, revenue, and payout history.
+        List<BookingStatus> blockingStatuses = List.of(BookingStatus.CONFIRMED, BookingStatus.COMPLETED);
+        if (bookingRepository.countBySubCourtIdAndStatusIn(subCourtId, blockingStatuses) > 0) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
                     "Cannot delete sub-court with existing bookings");
         }

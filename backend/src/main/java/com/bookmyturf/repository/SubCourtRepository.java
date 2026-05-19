@@ -2,9 +2,11 @@ package com.bookmyturf.repository;
 
 import com.bookmyturf.model.ListingStatus;
 import com.bookmyturf.model.SubCourt;
+import jakarta.persistence.LockModeType;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -49,4 +51,23 @@ public interface SubCourtRepository extends JpaRepository<SubCourt, Long> {
 
     @Query("SELECT COUNT(sc) FROM SubCourt sc WHERE sc.turf.id = :turfId AND sc.status = :status")
     long countByTurfIdAndStatus(@Param("turfId") Long turfId, @Param("status") ListingStatus status);
+
+    // APPROVED sub-courts for a single turf (customer/public visibility).
+    @Query("SELECT sc FROM SubCourt sc WHERE sc.turf.id = :turfId AND sc.status = 'APPROVED' ORDER BY sc.id ASC")
+    List<SubCourt> findApprovedByTurfId(@Param("turfId") Long turfId);
+
+    // Batch load APPROVED sub-courts for multiple turfs (used by discovery search to avoid N+1).
+    @Query("SELECT sc FROM SubCourt sc WHERE sc.turf.id IN :turfIds AND sc.status = 'APPROVED'")
+    List<SubCourt> findApprovedByTurfIdIn(@Param("turfIds") List<Long> turfIds);
+
+    // Booking initiate: find a bookable sub-court (APPROVED + turf APPROVED + owner ACTIVE).
+    @Query("SELECT sc FROM SubCourt sc WHERE sc.id = :id AND sc.status = 'APPROVED' " +
+           "AND sc.turf.status = 'APPROVED' AND sc.turf.owner.status = 'ACTIVE'")
+    Optional<SubCourt> findBookableById(@Param("id") Long id);
+
+    // Booking confirm: acquire a pessimistic WRITE lock on the sub_courts row to serialise
+    // concurrent confirms for the same sub-court. Different sub-courts proceed in parallel.
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT sc FROM SubCourt sc WHERE sc.id = :id")
+    Optional<SubCourt> findByIdForUpdate(@Param("id") Long id);
 }
