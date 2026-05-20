@@ -11,6 +11,8 @@ import com.razorpay.RazorpayClient;
 import com.razorpay.RazorpayException;
 import com.razorpay.Utils;
 import org.json.JSONObject;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -31,6 +33,7 @@ import java.util.stream.Collectors;
 @Transactional(readOnly = true)
 public class BookingService {
 
+    private static final Logger log = LoggerFactory.getLogger(BookingService.class);
     private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("HH:mm");
     private static final int BOOKING_HORIZON_DAYS = 90;
 
@@ -56,6 +59,14 @@ public class BookingService {
     // Read from config — DECISIONS.md §2: independent property, not collapsed with others.
     @Value("${app.payout.hold-hours}")
     private int payoutHoldHours;
+
+    // TODO: Remove this flag once a real fault-injection framework is adopted.
+    // Test-only fault injection: when true, forces a RazorpayException at the refund call
+    // site so the 5C-3 catch path is exercised without a real Razorpay failure.
+    // Default: false (application.properties). Override via application-local.properties
+    // (gitignored) or APP_TEST_FORCE_REFUND_FAILURE env var. NEVER set true in production.
+    @Value("${app.test.force-refund-failure:false}")
+    private boolean forceRefundFailure;
 
     public BookingService(SubCourtRepository subCourtRepository,
                           BookingRepository bookingRepository,
@@ -266,12 +277,20 @@ public class BookingService {
             refundRequest.put("amount", totalAmount.multiply(BigDecimal.valueOf(100)).longValue());
             com.razorpay.Refund rzpRefund;
             try {
+                // TODO: Remove fault-injection block once a real fault-injection framework is adopted.
+                if (forceRefundFailure) {
+                    throw new RazorpayException("test-only: forced refund failure");
+                }
                 rzpRefund = razorpayClient.payments.refund(req.razorpayPaymentId(), refundRequest);
             } catch (RazorpayException e) {
-                // 5C-3 path (refund call itself fails) — out of scope for 5C-2b.
-                // Still 409; 5C-3 will add the 502 branch here.
-                throw new ResponseStatusException(HttpStatus.CONFLICT,
-                        "Selected slot is no longer available");
+                // 5C-3: refund call itself failed. Durably record the orphaned payment and
+                // FAILED refund (REQUIRES_NEW — committed independently, survives outer rollback).
+                // Outer tx creates ZERO booking-side rows. Return 502; do not echo Razorpay detail.
+                log.error("Razorpay refund failed for payment {}: {}", req.razorpayPaymentId(), e.getMessage());
+                raceRefundRecoveryService.recordFailedRefund(
+                        totalAmount, req.razorpayPaymentId(), paymentMethod);
+                throw new ResponseStatusException(HttpStatus.BAD_GATEWAY,
+                        "Payment refund could not be processed");
             }
 
             raceRefundRecoveryService.recordRaceRefund(

@@ -84,4 +84,39 @@ public class RaceRefundRecoveryService {
         refund.setProcessedAt(LocalDateTime.now());
         refundRepository.save(refund);
     }
+
+    /**
+     * 5C-3 path: race detected, Razorpay refund call itself failed.
+     * Commits payment + FAILED-refund pair independently of the outer booking transaction.
+     *
+     * payment.status = SUCCESS  — the capture happened; we just failed to reverse it.
+     * refund.status  = FAILED   — the refund call did not complete; razorpayRefundId is null.
+     * refund.payment = payment  — operator queue FK. Query:
+     *   SELECT r.id, r.amount, p.gateway_transaction_id
+     *   FROM refunds r JOIN payments p ON r.payment_id = p.id
+     *   WHERE r.status = 'FAILED'
+     * gives every Razorpay payment id that needs manual dashboard remediation.
+     */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void recordFailedRefund(BigDecimal totalAmount,
+                                   String razorpayPaymentId,
+                                   String paymentMethod) {
+
+        Payment payment = new Payment();
+        payment.setBooking(null);
+        payment.setAmount(totalAmount);
+        payment.setGatewayTransactionId(razorpayPaymentId);
+        payment.setPaymentMethod(paymentMethod);
+        payment.setStatus(PaymentStatus.SUCCESS);
+        payment = paymentRepository.save(payment);
+
+        Refund refund = new Refund();
+        refund.setBooking(null);
+        refund.setPayment(payment);
+        refund.setAmount(totalAmount);
+        refund.setRazorpayRefundId(null);
+        refund.setStatus(RefundStatus.FAILED);
+        refund.setProcessedAt(LocalDateTime.now());
+        refundRepository.save(refund);
+    }
 }

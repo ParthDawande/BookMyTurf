@@ -23,6 +23,13 @@ public class Refund {
     @JoinColumn(name = "booking_id")
     private Booking booking;
 
+    // Set only on 5C-3 FAILED-refund recovery rows. Null for all other refund types.
+    // Provides the operator queue FK: JOIN payments ON refunds.payment_id = payments.id
+    // to retrieve gateway_transaction_id for manual Razorpay dashboard remediation.
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "payment_id")
+    private Payment payment;
+
     @Column(nullable = false, precision = 10, scale = 2)
     private BigDecimal amount;
 
