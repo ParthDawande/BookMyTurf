@@ -41,6 +41,7 @@ public class BookingService {
     private final PayoutRepository payoutRepository;
     private final NotificationRepository notificationRepository;
     private final RazorpayClient razorpayClient;
+    private final RaceRefundRecoveryService raceRefundRecoveryService;
 
     @Value("${app.razorpay.key-id}")
     private String razorpayKeyId;
@@ -62,7 +63,8 @@ public class BookingService {
                           PaymentRepository paymentRepository,
                           PayoutRepository payoutRepository,
                           NotificationRepository notificationRepository,
-                          RazorpayClient razorpayClient) {
+                          RazorpayClient razorpayClient,
+                          RaceRefundRecoveryService raceRefundRecoveryService) {
         this.subCourtRepository = subCourtRepository;
         this.bookingRepository = bookingRepository;
         this.bookingSlotRepository = bookingSlotRepository;
@@ -70,6 +72,7 @@ public class BookingService {
         this.payoutRepository = payoutRepository;
         this.notificationRepository = notificationRepository;
         this.razorpayClient = razorpayClient;
+        this.raceRefundRecoveryService = raceRefundRecoveryService;
     }
 
     // -------------------------------------------------------------------------
@@ -249,7 +252,31 @@ public class BookingService {
                 List.of(BookingStatus.CONFIRMED, BookingStatus.COMPLETED)));
         boolean anyTaken = slots.stream().anyMatch(s -> takenStarts.contains(s[0]));
         if (anyTaken) {
-            // 5C-2a: race detected, refund deferred to 5C-2b — payment intentionally not yet refunded here.
+            // 5C-2b: race detected — refund the captured payment, commit the recovery record,
+            // then return 409.  Exact Option A sequencing:
+            //   (a) fetch method  (b) refund via Razorpay  (c) commit recovery rows  (d) 409.
+            //
+            // Razorpay refund is issued BEFORE any DB write.  Recovery rows are committed in
+            // RaceRefundRecoveryService (@Transactional REQUIRES_NEW) and survive this tx
+            // rolling back.  Outer tx creates ZERO rows on this path (5C-2a invariant preserved).
+
+            String paymentMethod = fetchRazorpayPaymentMethod(req.razorpayPaymentId());
+
+            JSONObject refundRequest = new JSONObject();
+            refundRequest.put("amount", totalAmount.multiply(BigDecimal.valueOf(100)).longValue());
+            com.razorpay.Refund rzpRefund;
+            try {
+                rzpRefund = razorpayClient.payments.refund(req.razorpayPaymentId(), refundRequest);
+            } catch (RazorpayException e) {
+                // 5C-3 path (refund call itself fails) — out of scope for 5C-2b.
+                // Still 409; 5C-3 will add the 502 branch here.
+                throw new ResponseStatusException(HttpStatus.CONFLICT,
+                        "Selected slot is no longer available");
+            }
+
+            raceRefundRecoveryService.recordRaceRefund(
+                    totalAmount, req.razorpayPaymentId(), paymentMethod, rzpRefund.get("id"));
+
             throw new ResponseStatusException(HttpStatus.CONFLICT,
                     "Selected slot is no longer available");
         }

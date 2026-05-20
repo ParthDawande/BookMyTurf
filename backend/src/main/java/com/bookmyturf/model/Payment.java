@@ -17,8 +17,10 @@ public class Payment {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @ManyToOne(fetch = FetchType.LAZY, optional = false)
-    @JoinColumn(name = "booking_id", nullable = false)
+    // nullable = true: race-path recovery rows have no associated booking.
+    // Normal (happy-path) payments always have a booking set.
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "booking_id")
     private Booking booking;
 
     @Column(nullable = false, precision = 10, scale = 2)
