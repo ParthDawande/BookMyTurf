@@ -4,6 +4,7 @@ import com.bookmyturf.dto.customer.ConfirmBookingRequest;
 import com.bookmyturf.dto.customer.ConfirmBookingResponse;
 import com.bookmyturf.dto.customer.InitiateBookingRequest;
 import com.bookmyturf.dto.customer.InitiateBookingResponse;
+import com.bookmyturf.dto.customer.ReceiptResponse;
 import com.bookmyturf.model.User;
 import com.bookmyturf.service.BookingService;
 import jakarta.validation.Valid;
@@ -35,5 +36,12 @@ public class BookingController {
             @Valid @RequestBody ConfirmBookingRequest req) {
         return ResponseEntity.status(HttpStatus.CREATED)
                 .body(bookingService.confirm(user, req));
+    }
+
+    @GetMapping("/{id}/receipt")
+    public ResponseEntity<ReceiptResponse> receipt(
+            @AuthenticationPrincipal User user,
+            @PathVariable Long id) {
+        return ResponseEntity.ok(bookingService.getReceipt(user, id));
     }
 }

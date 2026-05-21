@@ -4,6 +4,7 @@ import com.bookmyturf.dto.customer.ConfirmBookingRequest;
 import com.bookmyturf.dto.customer.ConfirmBookingResponse;
 import com.bookmyturf.dto.customer.InitiateBookingRequest;
 import com.bookmyturf.dto.customer.InitiateBookingResponse;
+import com.bookmyturf.dto.customer.ReceiptResponse;
 import com.bookmyturf.model.*;
 import com.bookmyturf.repository.*;
 import com.razorpay.Order;
@@ -41,8 +42,10 @@ public class BookingService {
     private final BookingRepository bookingRepository;
     private final BookingSlotRepository bookingSlotRepository;
     private final PaymentRepository paymentRepository;
+    private final RefundRepository refundRepository;
     private final PayoutRepository payoutRepository;
     private final NotificationRepository notificationRepository;
+    private final CustomerProfileRepository customerProfileRepository;
     private final RazorpayClient razorpayClient;
     private final RaceRefundRecoveryService raceRefundRecoveryService;
 
@@ -72,16 +75,20 @@ public class BookingService {
                           BookingRepository bookingRepository,
                           BookingSlotRepository bookingSlotRepository,
                           PaymentRepository paymentRepository,
+                          RefundRepository refundRepository,
                           PayoutRepository payoutRepository,
                           NotificationRepository notificationRepository,
+                          CustomerProfileRepository customerProfileRepository,
                           RazorpayClient razorpayClient,
                           RaceRefundRecoveryService raceRefundRecoveryService) {
         this.subCourtRepository = subCourtRepository;
         this.bookingRepository = bookingRepository;
         this.bookingSlotRepository = bookingSlotRepository;
         this.paymentRepository = paymentRepository;
+        this.refundRepository = refundRepository;
         this.payoutRepository = payoutRepository;
         this.notificationRepository = notificationRepository;
+        this.customerProfileRepository = customerProfileRepository;
         this.razorpayClient = razorpayClient;
         this.raceRefundRecoveryService = raceRefundRecoveryService;
     }
@@ -386,6 +393,101 @@ public class BookingService {
                 payment.getId(),
                 req.razorpayPaymentId(),
                 booking.getCreatedAt() != null ? booking.getCreatedAt().toString() : null
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Endpoint 3: receipt — read-only JSON receipt for a confirmed/completed/
+    //             cancelled/refunded booking. DECISIONS.md §4: 400 (NEVER 422)
+    //             for disallowed status; 404 for not-found or not-owned (no-leak).
+    // -------------------------------------------------------------------------
+
+    public ReceiptResponse getReceipt(User customer, Long bookingId) {
+        // 1. Fetch booking — 404 if not found.
+        Booking booking = bookingRepository.findById(bookingId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Booking not found"));
+
+        // 2. Ownership check — 404 (not 403) to avoid leaking existence of other customers' bookings.
+        if (!booking.getCustomer().getId().equals(customer.getId())) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Booking not found");
+        }
+
+        // 3. Status whitelist — DECISIONS.md §4: all four current enum values are allowed.
+        //    Defensive guard for any future status additions — reject with 400, NEVER 422.
+        BookingStatus status = booking.getStatus();
+        if (status != BookingStatus.CONFIRMED && status != BookingStatus.COMPLETED
+                && status != BookingStatus.CANCELLED && status != BookingStatus.REFUNDED) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Receipt not available for this booking status");
+        }
+
+        // 4. Fetch all related data — ZERO writes anywhere below this line.
+        SubCourt sc = booking.getSubCourt();
+        Turf turf = sc.getTurf();
+
+        CustomerProfile cp = customerProfileRepository.findById(customer.getId())
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Profile not found"));
+
+        List<BookingSlot> slots = bookingSlotRepository.findByBookingId(bookingId);
+        slots.sort(Comparator.comparing(BookingSlot::getStartTime));
+
+        // Payments where booking_id = :bookingId — race-recovery rows (booking_id NULL) excluded
+        // by JPQL equality semantics (NULL != :bookingId in InnoDB).
+        List<Payment> payments = paymentRepository.findByBookingId(bookingId);
+
+        // Refunds where booking_id = :bookingId — same NULL-exclusion guarantee.
+        // Race-recovery refunds (booking_id IS NULL) CANNOT appear on any booking's receipt.
+        List<Refund> refunds = refundRepository.findByBookingId(bookingId);
+
+        // 5. Owner payout derived from the locked booking amounts (DECISIONS.md §1).
+        BigDecimal ownerPayout = booking.getTotalAmount().subtract(booking.getCommissionAmount());
+
+        // 6. Build response.
+        ReceiptResponse.CustomerInfo customerInfo = new ReceiptResponse.CustomerInfo(
+                cp.getName(), customer.getEmail(), customer.getPhone());
+
+        ReceiptResponse.TurfInfo turfInfo = new ReceiptResponse.TurfInfo(
+                turf.getId(), turf.getName(), turf.getAddress(), turf.getCity(),
+                sc.getName(), turf.getOwner().getPhone());
+
+        List<ReceiptResponse.SlotLine> slotLines = slots.stream()
+                .map(s -> new ReceiptResponse.SlotLine(
+                        TIME_FMT.format(s.getStartTime()),
+                        TIME_FMT.format(s.getEndTime()),
+                        s.getRateAtBooking()))
+                .collect(Collectors.toList());
+
+        ReceiptResponse.PaymentInfo paymentInfo = payments.isEmpty() ? null
+                : new ReceiptResponse.PaymentInfo(
+                        payments.get(0).getId(),
+                        payments.get(0).getGatewayTransactionId(),
+                        payments.get(0).getPaymentMethod(),
+                        payments.get(0).getCreatedAt() != null
+                                ? payments.get(0).getCreatedAt().toString() : null,
+                        payments.get(0).getAmount());
+
+        List<ReceiptResponse.RefundInfo> refundInfos = refunds.stream()
+                .map(r -> new ReceiptResponse.RefundInfo(
+                        r.getId(),
+                        r.getAmount(),
+                        r.getRazorpayRefundId(),
+                        r.getStatus().name(),
+                        r.getProcessedAt() != null ? r.getProcessedAt().toString() : null))
+                .collect(Collectors.toList());
+
+        return new ReceiptResponse(
+                booking.getId(),
+                booking.getStatus().name(),
+                booking.getCreatedAt() != null ? booking.getCreatedAt().toString() : null,
+                customerInfo,
+                turfInfo,
+                booking.getBookingDate().toString(),
+                slotLines,
+                booking.getTotalAmount(),
+                booking.getCommissionAmount(),
+                ownerPayout,
+                paymentInfo,
+                refundInfos
         );
     }
 
