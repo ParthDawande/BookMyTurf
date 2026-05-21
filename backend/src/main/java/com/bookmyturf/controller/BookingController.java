@@ -1,5 +1,6 @@
 package com.bookmyturf.controller;
 
+import com.bookmyturf.dto.customer.CancelBookingResponse;
 import com.bookmyturf.dto.customer.ConfirmBookingRequest;
 import com.bookmyturf.dto.customer.ConfirmBookingResponse;
 import com.bookmyturf.dto.customer.InitiateBookingRequest;
@@ -43,5 +44,12 @@ public class BookingController {
             @AuthenticationPrincipal User user,
             @PathVariable Long id) {
         return ResponseEntity.ok(bookingService.getReceipt(user, id));
+    }
+
+    @DeleteMapping("/{id}")
+    public ResponseEntity<CancelBookingResponse> cancel(
+            @AuthenticationPrincipal User user,
+            @PathVariable Long id) {
+        return ResponseEntity.ok(bookingService.cancel(user, id));
     }
 }

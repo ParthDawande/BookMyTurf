@@ -1,5 +1,6 @@
 package com.bookmyturf.service;
 
+import com.bookmyturf.dto.customer.CancelBookingResponse;
 import com.bookmyturf.dto.customer.ConfirmBookingRequest;
 import com.bookmyturf.dto.customer.ConfirmBookingResponse;
 import com.bookmyturf.dto.customer.InitiateBookingRequest;
@@ -22,11 +23,14 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
+import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
+import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -62,6 +66,10 @@ public class BookingService {
     // Read from config — DECISIONS.md §2: independent property, not collapsed with others.
     @Value("${app.payout.hold-hours}")
     private int payoutHoldHours;
+
+    // DECISIONS.md §2: independent cancellation window property — do NOT hardcode 24.
+    @Value("${app.booking.cancellation-window-hours}")
+    private int cancellationWindowHours;
 
     // TODO: Remove this flag once a real fault-injection framework is adopted.
     // Test-only fault injection: when true, forces a RazorpayException at the refund call
@@ -489,6 +497,180 @@ public class BookingService {
                 paymentInfo,
                 refundInfos
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Endpoint 4: cancel — pre-checks, Razorpay refund (Sequence A), DB writes.
+    //             DECISIONS §3: successful-refund → REFUNDED (NOT CANCELLED).
+    //             DECISIONS §2: IST-aligned 24h window, config-driven.
+    //             6B-i: refund-failure-record writing is a placeholder; hardened in 6B-ii.
+    // -------------------------------------------------------------------------
+
+    private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
+
+    @Transactional
+    public CancelBookingResponse cancel(User customer, Long bookingId) {
+
+        // ── PRE-CHECKS ──────────────────────────────────────────────────────────
+        // All guards run BEFORE any Razorpay call. Ordering is exact per spec.
+
+        // 1. Fetch booking — 404 for both not-found AND not-owned (no-leak pattern).
+        Booking booking = bookingRepository.findById(bookingId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Booking not found"));
+        if (!booking.getCustomer().getId().equals(customer.getId())) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Booking not found");
+        }
+
+        // 2. Status guard — only CONFIRMED bookings can be cancelled.
+        if (booking.getStatus() != BookingStatus.CONFIRMED) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Only confirmed bookings can be cancelled");
+        }
+
+        // 3 & 4. Time-window checks — require slots first.
+        List<BookingSlot> slots = bookingSlotRepository.findByBookingId(bookingId);
+        LocalTime earliestStart = slots.stream()
+                .map(BookingSlot::getStartTime)
+                .min(LocalTime::compareTo)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR,
+                        "Internal server error"));
+
+        // Timezone-correct comparison (DECISIONS §2 + Phase 5 IST hazard):
+        // Slot times are wall-clock IST. Resolve to UTC Instant for a safe comparison.
+        // Do NOT compare LocalDateTime to LocalDateTime relying on JVM default zone.
+        Instant slotStartInstant = booking.getBookingDate().atTime(earliestStart)
+                .atZone(IST).toInstant();
+        Instant now = Instant.now();
+
+        // 3. Past-slot guard — reject if the slot's wall-clock start has already arrived.
+        if (!now.isBefore(slotStartInstant)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Cannot cancel a booking whose start time has passed");
+        }
+
+        // 4. 24-hour window guard (DECISIONS §2: config-driven, NOT hardcoded).
+        //    Reject if now is NOT more than cancellationWindowHours before slot start.
+        Instant cancellationCutoff = slotStartInstant.minus(cancellationWindowHours, ChronoUnit.HOURS);
+        if (!now.isBefore(cancellationCutoff)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Cancellations must be made at least " + cancellationWindowHours
+                            + " hours before the booking start time");
+        }
+
+        // ── ZERO-AMOUNT DEFENSIVE PATH ──────────────────────────────────────────
+        // Impossible by current booking flow, but per DECISIONS §3: no Razorpay call;
+        // status = CANCELLED (NOT REFUNDED — DECISIONS §3 distinction: REFUNDED means
+        // money was returned; CANCELLED means no money changed hands).
+        if (booking.getTotalAmount().compareTo(BigDecimal.ZERO) == 0) {
+            booking.setStatus(BookingStatus.CANCELLED);
+            bookingRepository.save(booking);
+            cancelPayoutForBooking(bookingId);
+            int nullified = nullifySlotActive(slots);
+            log.info("Zero-amount cancel: booking {} CANCELLED, {} slots freed", bookingId, nullified);
+            emitBookingCancelledNotification(booking);
+            return new CancelBookingResponse(booking.getId(), BookingStatus.CANCELLED.name(),
+                    LocalDateTime.now().toString(), List.of(), BigDecimal.ZERO);
+        }
+
+        // ── SEQUENCE A: RAZORPAY FIRST, THEN DB ─────────────────────────────────
+        // Find SUCCESS payments for this booking.
+        // booking_id = :bookingId means race-recovery payments (booking_id NULL) are NEVER matched.
+        List<Payment> successPayments = paymentRepository.findByBookingIdAndStatus(
+                bookingId, PaymentStatus.SUCCESS);
+
+        List<CancelBookingResponse.RefundInfo> refundInfos = new ArrayList<>();
+        BigDecimal totalRefunded = BigDecimal.ZERO;
+
+        for (Payment payment : successPayments) {
+            JSONObject refundRequest = new JSONObject();
+            refundRequest.put("amount",
+                    payment.getAmount().multiply(BigDecimal.valueOf(100)).longValue());
+
+            com.razorpay.Refund rzpRefund;
+            try {
+                rzpRefund = razorpayClient.payments.refund(
+                        payment.getGatewayTransactionId(), refundRequest);
+            } catch (RazorpayException e) {
+                // 6B-i: refund-failure record writing deferred to 6B-ii.
+                // Do NOT write any FAILED refund row here — that is 6B-ii's scope.
+                // The outer @Transactional will roll back; booking remains CONFIRMED.
+                log.error("Razorpay cancel-refund failed for booking {} payment {}: {}",
+                        bookingId, payment.getGatewayTransactionId(), e.getMessage());
+                throw new ResponseStatusException(HttpStatus.BAD_GATEWAY,
+                        "Payment refund could not be processed");
+            }
+
+            // Razorpay confirmed the refund — write refund row immediately.
+            // booking_id = this booking (NOT NULL — this is a cancellation refund, NOT race-recovery).
+            Refund refund = new Refund();
+            refund.setBooking(booking);
+            refund.setPayment(payment);
+            refund.setAmount(payment.getAmount());
+            refund.setRazorpayRefundId(rzpRefund.get("id"));
+            refund.setStatus(RefundStatus.SUCCESS);
+            refund.setProcessedAt(LocalDateTime.now());
+            refund = refundRepository.save(refund);
+
+            totalRefunded = totalRefunded.add(payment.getAmount());
+            refundInfos.add(new CancelBookingResponse.RefundInfo(
+                    refund.getId(),
+                    refund.getAmount(),
+                    refund.getRazorpayRefundId(),
+                    refund.getStatus().name(),
+                    refund.getProcessedAt().toString()));
+        }
+
+        // ── DB WRITES — all in the same outer @Transactional ────────────────────
+
+        // DECISIONS §3: REFUNDED (NOT CANCELLED) for a cancellation with a successful refund.
+        booking.setStatus(BookingStatus.REFUNDED);
+        bookingRepository.save(booking);
+
+        // Owner will not be paid — cancel the pending payout.
+        cancelPayoutForBooking(bookingId);
+
+        // Phase 1 contract: set slot_active = NULL on every booking_slots row so the
+        // uq_active_slot unique index releases the slot for re-booking.
+        int nullified = nullifySlotActive(slots);
+        log.info("Cancel booking {}: {} slot(s) freed (slot_active → NULL)", bookingId, nullified);
+
+        // DECISIONS §5: owner-directed notification ONLY; zero customer-facing notifications.
+        emitBookingCancelledNotification(booking);
+
+        return new CancelBookingResponse(
+                booking.getId(),
+                booking.getStatus().name(),
+                LocalDateTime.now().toString(),
+                refundInfos,
+                totalRefunded
+        );
+    }
+
+    // ── Cancel helpers ────────────────────────────────────────────────────────
+
+    private void cancelPayoutForBooking(Long bookingId) {
+        payoutRepository.findByBookingId(bookingId).ifPresent(payout -> {
+            payout.setStatus(PayoutStatus.CANCELLED);
+            payoutRepository.save(payout);
+        });
+    }
+
+    private int nullifySlotActive(List<BookingSlot> slots) {
+        for (BookingSlot slot : slots) {
+            slot.setSlotActive(null);
+            bookingSlotRepository.save(slot);
+        }
+        return slots.size();
+    }
+
+    private void emitBookingCancelledNotification(Booking booking) {
+        SubCourt sc = booking.getSubCourt();
+        Notification notification = new Notification();
+        notification.setUser(sc.getTurf().getOwner());
+        notification.setType("BOOKING_CANCELLED");
+        notification.setMessage("Booking cancelled for " + sc.getTurf().getName()
+                + " (" + sc.getName() + ") on " + booking.getBookingDate());
+        notificationRepository.save(notification);
     }
 
     // -------------------------------------------------------------------------
