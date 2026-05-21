@@ -1,13 +1,13 @@
 <!--
-  PHASE-5B/5C TEST HARNESS — DELETE AT PHASE 9
-  Two-section: Section 1 = race-test order, Section 2 = regression order.
-  Complete Section 1 first, note the 3 values, then complete Section 2.
+  PHASE-5B/5C/6B TEST HARNESS — DELETE AT PHASE 9
+  6B-ii Regression Section: complete the Razorpay payment for the 6B-ii regression booking.
+  Use Net Banking → pick any bank → click Success on the mock bank page.
 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Phase-5C-2a Checkout Harness</title>
+  <title>Phase-6B-ii Checkout Harness</title>
   <style>
     body { font-family: monospace; max-width: 720px; margin: 40px auto; padding: 0 16px; background: #0f0f0f; color: #e0e0e0; }
     h2 { color: #ff9800; }
@@ -26,8 +26,8 @@
 </head>
 <body>
 
-<h2>Phase-5C-2a Checkout Harness</h2>
-<p style="color:#888;font-size:13px;">Complete Section 1 first, copy the 3 values. Then complete Section 2, copy those 3 values. Provide all 6 to Claude.</p>
+<h2>Phase-6B-ii Regression Checkout</h2>
+<p style="color:#888;font-size:13px;">Complete this payment. Copy the 3 values and give them to Claude to call /confirm.</p>
 
 <div class="note">
   <strong>Payment method:</strong> Net Banking → pick any bank → click Success on the mock bank page.<br>
@@ -35,45 +35,24 @@
 </div>
 
 <!-- ═══════════════════════════════════════════════════════ -->
-<h3>Section 1 — Race-Test Order (2026-05-28, 18:00–20:00)</h3>
-<p style="color:#888;font-size:12px;">Complete this payment but DO NOT call /confirm — I will handle the race injection and confirm call.</p>
+<h3>6B-ii Regression Order (2026-06-15, 10:00–11:00, sub-court 7)</h3>
+<p style="color:#888;font-size:12px;">Complete this payment. Copy all 3 values below and provide to Claude.</p>
 
 <label>Key ID</label>
 <input id="keyId1" value="rzp_test_SrDuAgjwbGaeOl" />
 <label>Order ID</label>
-<input id="orderId1" value="order_SrJFEDcrRVKGT7" />
+<input id="orderId1" value="order_Ss19hiYcJwpu3a" />
 <label>Amount (paise)</label>
-<input id="amount1" type="number" value="120000" />
+<input id="amount1" type="number" value="60000" />
 <label>Name</label><input id="name1" value="Test Cust" />
 <label>Email</label><input id="email1" value="cust.p3@example.com" />
 <label>Phone</label><input id="phone1" value="9876543297" />
 
-<button onclick="pay(1)">Pay — Section 1</button>
+<button onclick="pay(1)">Pay — 6B-ii Regression</button>
 
 <div class="result" id="result1">
-  <h4>✓ Section 1 payment done — copy these values</h4>
+  <h4>✓ Payment done — copy these 3 values and give to Claude</h4>
   <div class="val-box" id="vals1"></div>
-</div>
-
-<!-- ═══════════════════════════════════════════════════════ -->
-<h3>Section 2 — Regression Order (2026-05-30, 18:00–20:00)</h3>
-<p style="color:#888;font-size:12px;">Complete this after Section 1. This is the clean happy-path booking.</p>
-
-<label>Key ID</label>
-<input id="keyId2" value="rzp_test_SrDuAgjwbGaeOl" />
-<label>Order ID</label>
-<input id="orderId2" value="order_SrJFEPLIPQ7euv" />
-<label>Amount (paise)</label>
-<input id="amount2" type="number" value="120000" />
-<label>Name</label><input id="name2" value="Test Cust" />
-<label>Email</label><input id="email2" value="cust.p3@example.com" />
-<label>Phone</label><input id="phone2" value="9876543297" />
-
-<button onclick="pay(2)">Pay — Section 2</button>
-
-<div class="result" id="result2">
-  <h4>✓ Section 2 payment done — copy these values</h4>
-  <div class="val-box" id="vals2"></div>
 </div>
 
 <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
@@ -85,7 +64,7 @@ function pay(n) {
     currency: 'INR',
     order_id: document.getElementById('orderId'+n).value.trim(),
     name:     'BookMyTurf',
-    description: 'Phase-5C-2a Test (Section ' + n + ')',
+    description: 'Phase-6B-ii Regression Test',
     prefill: {
       name:    document.getElementById('name'+n).value.trim(),
       email:   document.getElementById('email'+n).value.trim(),

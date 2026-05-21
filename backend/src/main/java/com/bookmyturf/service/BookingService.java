@@ -588,14 +588,24 @@ public class BookingService {
 
             com.razorpay.Refund rzpRefund;
             try {
+                // TODO: Remove fault-injection block once a real fault-injection framework is adopted.
+                // Reuses the 5C-3 flag. When true, BOTH the race path (confirm) AND this cancel
+                // path throw RazorpayException, exercising each path's failure handling independently.
+                if (forceRefundFailure) {
+                    throw new RazorpayException("test-only: forced refund failure");
+                }
                 rzpRefund = razorpayClient.payments.refund(
                         payment.getGatewayTransactionId(), refundRequest);
             } catch (RazorpayException e) {
-                // 6B-i: refund-failure record writing deferred to 6B-ii.
-                // Do NOT write any FAILED refund row here — that is 6B-ii's scope.
-                // The outer @Transactional will roll back; booking remains CONFIRMED.
+                // 6B-ii: write a FAILED refund row in its own REQUIRES_NEW tx — durable even
+                // when the outer @Transactional rolls back. booking_id IS NOT NULL distinguishes
+                // this row from race-recovery FAILED rows (booking_id IS NULL). Booking stays
+                // CONFIRMED; slot_active stays 1; payout stays PENDING — cancellation did not
+                // happen; a future retry is eligible.
                 log.error("Razorpay cancel-refund failed for booking {} payment {}: {}",
                         bookingId, payment.getGatewayTransactionId(), e.getMessage());
+                raceRefundRecoveryService.recordCancelRefundFailure(
+                        bookingId, payment.getId(), payment.getAmount());
                 throw new ResponseStatusException(HttpStatus.BAD_GATEWAY,
                         "Payment refund could not be processed");
             }

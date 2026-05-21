@@ -1,6 +1,7 @@
 package com.bookmyturf.service;
 
 import com.bookmyturf.model.*;
+import com.bookmyturf.repository.BookingRepository;
 import com.bookmyturf.repository.PaymentRepository;
 import com.bookmyturf.repository.RefundRepository;
 import org.springframework.stereotype.Service;
@@ -49,11 +50,14 @@ public class RaceRefundRecoveryService {
 
     private final PaymentRepository paymentRepository;
     private final RefundRepository refundRepository;
+    private final BookingRepository bookingRepository;
 
     public RaceRefundRecoveryService(PaymentRepository paymentRepository,
-                                     RefundRepository refundRepository) {
+                                     RefundRepository refundRepository,
+                                     BookingRepository bookingRepository) {
         this.paymentRepository = paymentRepository;
         this.refundRepository = refundRepository;
+        this.bookingRepository = bookingRepository;
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
@@ -114,6 +118,41 @@ public class RaceRefundRecoveryService {
         refund.setBooking(null);
         refund.setPayment(payment);
         refund.setAmount(totalAmount);
+        refund.setRazorpayRefundId(null);
+        refund.setStatus(RefundStatus.FAILED);
+        refund.setProcessedAt(LocalDateTime.now());
+        refundRepository.save(refund);
+    }
+
+    /**
+     * 6B-ii path: cancellation Razorpay refund call failed.
+     * Commits a single FAILED refund row, independently of the outer cancel transaction.
+     *
+     * booking_id IS NOT NULL — this is a real cancellation attempt against an existing
+     *   booking; distinguishes from race-recovery FAILED rows (booking_id IS NULL).
+     * payment_id is set     — operator queue FK; lets the queue surface the captured
+     *   Razorpay payment ID for manual dashboard remediation.
+     * razorpayRefundId = null — the refund call did not complete; no Razorpay refund ID.
+     *
+     * The booking remains CONFIRMED; slot_active stays 1; payout stays PENDING.
+     * The cancellation did not happen — a future retry is eligible.
+     *
+     * Operator queues:
+     *   Race FAILED:        SELECT ... FROM refunds WHERE status='FAILED' AND booking_id IS NULL
+     *   Cancellation FAILED: SELECT ... FROM refunds WHERE status='FAILED' AND booking_id IS NOT NULL
+     *
+     * IDs are passed (not entities) to avoid detached-entity issues across the tx boundary.
+     * getReferenceById creates a proxy; only the ID is used for the INSERT FK column.
+     */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void recordCancelRefundFailure(Long bookingId, Long paymentId, BigDecimal amount) {
+        Booking bookingRef = bookingRepository.getReferenceById(bookingId);
+        Payment paymentRef = paymentRepository.getReferenceById(paymentId);
+
+        Refund refund = new Refund();
+        refund.setBooking(bookingRef);
+        refund.setPayment(paymentRef);
+        refund.setAmount(amount);
         refund.setRazorpayRefundId(null);
         refund.setStatus(RefundStatus.FAILED);
         refund.setProcessedAt(LocalDateTime.now());
