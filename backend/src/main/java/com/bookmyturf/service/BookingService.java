@@ -6,8 +6,11 @@ import com.bookmyturf.dto.customer.ConfirmBookingResponse;
 import com.bookmyturf.dto.customer.InitiateBookingRequest;
 import com.bookmyturf.dto.customer.InitiateBookingResponse;
 import com.bookmyturf.dto.customer.ReceiptResponse;
+import com.bookmyturf.dto.customer.RescheduleInitiateRequest;
+import com.bookmyturf.dto.customer.RescheduleInitiateResponse;
 import com.bookmyturf.model.*;
 import com.bookmyturf.repository.*;
+import com.bookmyturf.security.JwtUtil;
 import com.razorpay.Order;
 import com.razorpay.RazorpayClient;
 import com.razorpay.RazorpayException;
@@ -52,6 +55,7 @@ public class BookingService {
     private final CustomerProfileRepository customerProfileRepository;
     private final RazorpayClient razorpayClient;
     private final RaceRefundRecoveryService raceRefundRecoveryService;
+    private final JwtUtil jwtUtil;
 
     @Value("${app.razorpay.key-id}")
     private String razorpayKeyId;
@@ -71,6 +75,11 @@ public class BookingService {
     @Value("${app.booking.cancellation-window-hours}")
     private int cancellationWindowHours;
 
+    // DECISIONS.md §2: independent reschedule window property — SEPARATE from cancellation.
+    // Do NOT collapse these two into one constant.
+    @Value("${app.booking.reschedule-window-hours}")
+    private int rescheduleWindowHours;
+
     // TODO: Remove this flag once a real fault-injection framework is adopted.
     // Test-only fault injection: when true, forces a RazorpayException at the refund call
     // site so the 5C-3 catch path is exercised without a real Razorpay failure.
@@ -88,7 +97,8 @@ public class BookingService {
                           NotificationRepository notificationRepository,
                           CustomerProfileRepository customerProfileRepository,
                           RazorpayClient razorpayClient,
-                          RaceRefundRecoveryService raceRefundRecoveryService) {
+                          RaceRefundRecoveryService raceRefundRecoveryService,
+                          JwtUtil jwtUtil) {
         this.subCourtRepository = subCourtRepository;
         this.bookingRepository = bookingRepository;
         this.bookingSlotRepository = bookingSlotRepository;
@@ -99,6 +109,7 @@ public class BookingService {
         this.customerProfileRepository = customerProfileRepository;
         this.razorpayClient = razorpayClient;
         this.raceRefundRecoveryService = raceRefundRecoveryService;
+        this.jwtUtil = jwtUtil;
     }
 
     // -------------------------------------------------------------------------
@@ -653,6 +664,172 @@ public class BookingService {
                 LocalDateTime.now().toString(),
                 refundInfos,
                 totalRefunded
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Endpoint 5: reschedule/initiate — read + compute, zero DB writes.
+    //             Three response cases depending on price_diff sign.
+    //             Case PAYMENT: creates a Razorpay ORDER (not a payment capture).
+    //             DECISIONS §2: reschedule window is app.booking.reschedule-window-hours,
+    //             a SEPARATE config property from app.booking.cancellation-window-hours.
+    // -------------------------------------------------------------------------
+
+    public RescheduleInitiateResponse rescheduleInitiate(
+            User customer, Long bookingId, RescheduleInitiateRequest req) {
+
+        // ── PRE-CHECKS ──────────────────────────────────────────────────────
+        // 1. Fetch booking — 404 for both not-found AND not-owned (no-leak pattern).
+        Booking booking = bookingRepository.findById(bookingId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Booking not found"));
+        if (!booking.getCustomer().getId().equals(customer.getId())) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Booking not found");
+        }
+
+        // 2. Status guard — CONFIRMED only.
+        if (booking.getStatus() != BookingStatus.CONFIRMED) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Only confirmed bookings can be rescheduled");
+        }
+
+        // 3 & 4. Time-window checks — need existing slots first.
+        List<BookingSlot> existingSlots = bookingSlotRepository.findByBookingId(bookingId);
+        LocalTime earliestExistingStart = existingSlots.stream()
+                .map(BookingSlot::getStartTime)
+                .min(LocalTime::compareTo)
+                .orElseThrow(() -> new ResponseStatusException(
+                        HttpStatus.INTERNAL_SERVER_ERROR, "Internal server error"));
+
+        // IST-aligned comparison (same tz-safety pattern as 6B cancel).
+        // Slot times are wall-clock IST; resolve to UTC Instant for safe comparison.
+        Instant existingSlotInstant = booking.getBookingDate()
+                .atTime(earliestExistingStart).atZone(IST).toInstant();
+        Instant now = Instant.now();
+
+        // 3. Past-slot guard.
+        if (!now.isBefore(existingSlotInstant)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Cannot reschedule a booking whose start time has passed");
+        }
+
+        // 4. 24-hour reschedule window — DECISIONS §2: config-driven, SEPARATE property.
+        //    Reject if now is NOT more than rescheduleWindowHours before existing slot start.
+        Instant rescheduleCutoff = existingSlotInstant.minus(rescheduleWindowHours, ChronoUnit.HOURS);
+        if (!now.isBefore(rescheduleCutoff)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Bookings must be rescheduled at least " + rescheduleWindowHours
+                            + " hours before the booking start time");
+        }
+
+        // 5a. Parse and range-check proposed new date.
+        LocalDate newDate = parseDate(req.newBookingDate(), "Invalid new date");
+        LocalDate today = LocalDate.now();
+        if (newDate.isBefore(today) || newDate.isAfter(today.plusDays(BOOKING_HORIZON_DAYS))) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid new date");
+        }
+
+        // 5b. Parse and validate proposed new slots (hourly, within operating hours, contiguous).
+        SubCourt sc = booking.getSubCourt();
+        List<LocalTime[]> newParsedSlots = parseAndValidateSlots(req.newSlots(), sc);
+
+        // 5c. New earliest slot must be in the future (can't reschedule to the past).
+        LocalTime newEarliestStart = newParsedSlots.stream()
+                .map(s -> s[0])
+                .min(LocalTime::compareTo)
+                .orElseThrow();
+        Instant newSlotInstant = newDate.atTime(newEarliestStart).atZone(IST).toInstant();
+        if (!Instant.now().isBefore(newSlotInstant)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid new date");
+        }
+
+        // ── AVAILABILITY CHECK (with self-collision exclusion) ───────────────
+        // Exclude this booking's own slots so the customer can keep any of their
+        // current slots as part of the proposed reschedule without colliding with themselves.
+        Set<LocalTime> takenStarts = new HashSet<>(bookingSlotRepository.findTakenSlotStartTimesExcluding(
+                sc.getId(), newDate,
+                List.of(BookingStatus.CONFIRMED, BookingStatus.COMPLETED),
+                bookingId));
+
+        List<String> unavailable = newParsedSlots.stream()
+                .filter(s -> takenStarts.contains(s[0]))
+                .map(s -> TIME_FMT.format(s[0]) + "-" + TIME_FMT.format(s[1]))
+                .collect(Collectors.toList());
+        if (!unavailable.isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "One or more new slots are no longer available");
+        }
+
+        // ── PRICE COMPUTATION ────────────────────────────────────────────────
+        // new_total uses sub-court's CURRENT hourly_price (server-derived, never client-supplied).
+        BigDecimal newRate = sc.getHourlyPrice();
+        BigDecimal newTotal = newRate.multiply(BigDecimal.valueOf(newParsedSlots.size()));
+        BigDecimal oldTotal = booking.getTotalAmount();
+        BigDecimal priceDiff = newTotal.subtract(oldTotal);
+
+        // Encode new slots in compact pipe-delimited format (same as 5B Razorpay notes).
+        String newSlotsJson = newParsedSlots.stream()
+                .map(s -> TIME_FMT.format(s[0]) + "-" + TIME_FMT.format(s[1]))
+                .collect(Collectors.joining("|"));
+
+        // ── BRANCH ON price_diff ─────────────────────────────────────────────
+        String actionRequired;
+        String razorpayOrderId = null;
+
+        int cmp = priceDiff.compareTo(BigDecimal.ZERO);
+        if (cmp == 0) {
+            // Case NONE: amounts equal — no payment or refund needed.
+            actionRequired = "NONE";
+
+        } else if (cmp > 0) {
+            // Case PAYMENT: customer must pay the difference.
+            // Create Razorpay ORDER for price_diff (paise). Not a payment capture.
+            JSONObject notes = new JSONObject();
+            notes.put("booking_id",       bookingId.toString());
+            notes.put("customer_id",      customer.getId().toString());
+            notes.put("new_booking_date", newDate.toString());
+            notes.put("new_slots_json",   newSlotsJson);
+            notes.put("new_total",        newTotal.toPlainString());
+            notes.put("price_diff",       priceDiff.toPlainString());
+
+            JSONObject orderReq = new JSONObject();
+            orderReq.put("amount",   priceDiff.multiply(BigDecimal.valueOf(100)).longValue());
+            orderReq.put("currency", "INR");
+            orderReq.put("receipt",  "rsch_" + bookingId + "_" + System.currentTimeMillis());
+            orderReq.put("notes",    notes);
+
+            try {
+                Order rzpOrder = razorpayClient.orders.create(orderReq);
+                razorpayOrderId = rzpOrder.get("id");
+            } catch (RazorpayException e) {
+                throw new ResponseStatusException(HttpStatus.BAD_GATEWAY,
+                        "Unable to create payment order. Please try again.");
+            }
+            actionRequired = "PAYMENT";
+
+        } else {
+            // Case REFUND: customer will receive a partial refund on confirm.
+            actionRequired = "REFUND";
+        }
+
+        // ── RESCHEDULE TOKEN (15-min signed JWT) ─────────────────────────────
+        // Signed with the same app.jwt.secret key; type="RESCHEDULE" distinguishes
+        // it from auth tokens. Payload carries everything confirm needs to reconstruct
+        // the proposed reschedule without any DB or cache storage.
+        String rescheduleToken = jwtUtil.generateRescheduleToken(
+                bookingId, customer.getId(),
+                newDate.toString(), newSlotsJson,
+                newRate, oldTotal, newTotal, priceDiff,
+                razorpayOrderId);
+
+        return new RescheduleInitiateResponse(
+                booking.getId(),
+                oldTotal,
+                newTotal,
+                priceDiff,
+                actionRequired,
+                rescheduleToken,
+                razorpayOrderId,
+                "PAYMENT".equals(actionRequired) ? razorpayKeyId : null
         );
     }
 

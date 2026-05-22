@@ -6,6 +6,8 @@ import com.bookmyturf.dto.customer.ConfirmBookingResponse;
 import com.bookmyturf.dto.customer.InitiateBookingRequest;
 import com.bookmyturf.dto.customer.InitiateBookingResponse;
 import com.bookmyturf.dto.customer.ReceiptResponse;
+import com.bookmyturf.dto.customer.RescheduleInitiateRequest;
+import com.bookmyturf.dto.customer.RescheduleInitiateResponse;
 import com.bookmyturf.model.User;
 import com.bookmyturf.service.BookingService;
 import jakarta.validation.Valid;
@@ -51,5 +53,13 @@ public class BookingController {
             @AuthenticationPrincipal User user,
             @PathVariable Long id) {
         return ResponseEntity.ok(bookingService.cancel(user, id));
+    }
+
+    @PostMapping("/{id}/reschedule/initiate")
+    public ResponseEntity<RescheduleInitiateResponse> rescheduleInitiate(
+            @AuthenticationPrincipal User user,
+            @PathVariable Long id,
+            @Valid @RequestBody RescheduleInitiateRequest req) {
+        return ResponseEntity.ok(bookingService.rescheduleInitiate(user, id, req));
     }
 }

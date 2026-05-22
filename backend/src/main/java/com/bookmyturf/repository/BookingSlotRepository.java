@@ -25,4 +25,17 @@ public interface BookingSlotRepository extends JpaRepository<BookingSlot, Long> 
     List<LocalTime> findTakenSlotStartTimes(@Param("subCourtId") Long subCourtId,
                                             @Param("date") LocalDate date,
                                             @Param("statuses") List<BookingStatus> statuses);
+
+    // Same as above but excludes one specific booking — used by reschedule/initiate so
+    // the customer's OWN existing slots are not counted as conflicts on the new date.
+    @Query("SELECT bs.startTime FROM BookingSlot bs " +
+           "WHERE bs.subCourt.id = :subCourtId " +
+           "AND bs.bookingDate = :date " +
+           "AND bs.booking.status IN :statuses " +
+           "AND bs.booking.id <> :excludeBookingId")
+    List<LocalTime> findTakenSlotStartTimesExcluding(
+            @Param("subCourtId") Long subCourtId,
+            @Param("date") LocalDate date,
+            @Param("statuses") List<BookingStatus> statuses,
+            @Param("excludeBookingId") Long excludeBookingId);
 }
