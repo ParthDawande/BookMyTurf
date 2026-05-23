@@ -1049,10 +1049,16 @@ public class BookingService {
 
             com.razorpay.Refund rzpRefund;
             try {
+                // Same fault-injection flag as 5C-3 and 6B cancel path.
+                // Exercises the catch block without a real Razorpay failure.
+                if (forceRefundFailure) {
+                    throw new RazorpayException("test-only: forced refund failure");
+                }
                 rzpRefund = razorpayClient.payments.refund(
                         refundTarget.getGatewayTransactionId(), refundRequest);
             } catch (RazorpayException e) {
-                // 6C-ii-3: refund-failure FAILED-record writing deferred to 6C-ii-4.
+                // 6C-iii: reschedule refund-failure FAILED-record writing pending
+                // (parallel to 6B-ii's cancel FAILED-record pattern).
                 // Booking is COMPLETELY UNCHANGED — no DB writes on this path.
                 log.error("Razorpay reschedule-refund failed for booking {} payment {}: {}",
                         bookingId, refundTarget.getGatewayTransactionId(), e.getMessage());
