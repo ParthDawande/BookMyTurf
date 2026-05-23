@@ -1028,8 +1028,132 @@ public class BookingService {
                     null, null, null, null);
 
         } else if ("REFUND".equals(serverActionRequired)) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                    "Refund-case reschedule confirm not yet implemented (6C-ii-3)");
+
+            // 1. Find the oldest SUCCESS payment for this booking.
+            //    findByBookingIdAndStatus orders ASC — index 0 is the oldest.
+            //    booking_id IS NOT NULL guaranteed by JPQL equality (race-recovery rows excluded).
+            List<Payment> successPayments = paymentRepository.findByBookingIdAndStatus(
+                    bookingId, PaymentStatus.SUCCESS);
+            if (successPayments.isEmpty()) {
+                throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR,
+                        "Internal server error");
+            }
+            Payment refundTarget = successPayments.get(0);
+
+            // 2. refund_amount = |serverPriceDiff| — this is a PARTIAL refund, not the booking total.
+            BigDecimal refundAmount = serverPriceDiff.abs();
+
+            // 3. Razorpay refund call — SEQUENCE A: gateway first, DB transaction after.
+            JSONObject refundRequest = new JSONObject();
+            refundRequest.put("amount", refundAmount.multiply(BigDecimal.valueOf(100)).longValue());
+
+            com.razorpay.Refund rzpRefund;
+            try {
+                rzpRefund = razorpayClient.payments.refund(
+                        refundTarget.getGatewayTransactionId(), refundRequest);
+            } catch (RazorpayException e) {
+                // 6C-ii-3: refund-failure FAILED-record writing deferred to 6C-ii-4.
+                // Booking is COMPLETELY UNCHANGED — no DB writes on this path.
+                log.error("Razorpay reschedule-refund failed for booking {} payment {}: {}",
+                        bookingId, refundTarget.getGatewayTransactionId(), e.getMessage());
+                throw new ResponseStatusException(HttpStatus.BAD_GATEWAY,
+                        "Payment refund could not be processed");
+            }
+
+            // 4. Razorpay confirmed the partial refund — begin DB transaction (same outer @Transactional).
+
+            Long scId = booking.getSubCourt().getId();
+
+            // 4a. SELECT FOR UPDATE on sub-court.
+            SubCourt lockedSc = subCourtRepository.findByIdForUpdate(scId)
+                    .orElseThrow(() -> new ResponseStatusException(
+                            HttpStatus.INTERNAL_SERVER_ERROR, "Internal server error"));
+
+            // 4b. Re-check new slot availability under lock (excluding own current slots).
+            //     NOTE: If this 409 fires, Razorpay has already refunded but our DB has no
+            //     refunds row — Option A residue, detectable by Razorpay-vs-DB reconciliation.
+            Set<LocalTime> taken = new HashSet<>(bookingSlotRepository.findTakenSlotStartTimesExcluding(
+                    scId, newBookingDate,
+                    List.of(BookingStatus.CONFIRMED, BookingStatus.COMPLETED),
+                    bookingId));
+            if (newSlots.stream().anyMatch(s -> taken.contains(s[0]))) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT,
+                        "Selected slot is no longer available");
+            }
+
+            // 4c. Delete old booking_slots; flush before insert to avoid uq_active_slot on same-date reschedule.
+            List<BookingSlot> existingSlots = bookingSlotRepository.findByBookingId(bookingId);
+            int deletedCount = existingSlots.size();
+            bookingSlotRepository.deleteAll(existingSlots);
+            bookingSlotRepository.flush();
+
+            // 4d. Insert new booking_slots with Phase 1 backstop columns + slot_active=1.
+            for (LocalTime[] slot : newSlots) {
+                BookingSlot bs = new BookingSlot();
+                bs.setBooking(booking);
+                bs.setStartTime(slot[0]);
+                bs.setEndTime(slot[1]);
+                bs.setRateAtBooking(lockedSc.getHourlyPrice());
+                bs.setSubCourt(lockedSc);
+                bs.setBookingDate(newBookingDate);
+                bs.setSlotActive(1);
+                bookingSlotRepository.save(bs);
+            }
+            log.info("Reschedule REFUND booking {}: {} old slot(s) deleted, {} new slot(s) inserted",
+                    bookingId, deletedCount, newSlots.size());
+
+            // 4e-g. Update booking: date, total, commission.
+            String oldBookingDateStr = booking.getBookingDate().toString();
+            BigDecimal newCommission = serverNewTotal
+                    .multiply(commissionRate).setScale(2, RoundingMode.HALF_UP);
+            booking.setBookingDate(newBookingDate);
+            booking.setTotalAmount(serverNewTotal);
+            booking.setCommissionAmount(newCommission);
+            // 4k. Status STAYS CONFIRMED — DECISIONS §3: partial refund does NOT change status.
+            bookingRepository.save(booking);
+
+            // 4h-i. Update payout: reduced amount + IST-aligned scheduled_at.
+            LocalTime lastSlotEnd = newSlots.get(newSlots.size() - 1)[1];
+            Instant newScheduledAtInstant = newBookingDate.atTime(lastSlotEnd)
+                    .atZone(IST).toInstant().plus(payoutHoldHours, ChronoUnit.HOURS);
+            BigDecimal ownerPayoutAmount = serverNewTotal.subtract(newCommission);
+            payoutRepository.findByBookingId(bookingId).ifPresent(payout -> {
+                payout.setAmount(ownerPayoutAmount);
+                payout.setScheduledAt(LocalDateTime.ofInstant(newScheduledAtInstant, IST));
+                payoutRepository.save(payout);
+            });
+
+            // 4j. Write refunds row — booking_id NOT NULL (this is a reschedule refund, not race-recovery).
+            Refund refund = new Refund();
+            refund.setBooking(booking);
+            refund.setPayment(refundTarget);
+            refund.setAmount(refundAmount);
+            refund.setRazorpayRefundId(rzpRefund.get("id"));
+            refund.setStatus(RefundStatus.SUCCESS);
+            refund.setProcessedAt(LocalDateTime.now());
+            refund = refundRepository.save(refund);
+
+            // 4l. Owner notification — DECISIONS §5: no customer-facing notification.
+            Notification notif = new Notification();
+            notif.setUser(lockedSc.getTurf().getOwner());
+            notif.setType("BOOKING_RESCHEDULED");
+            notif.setMessage("Booking rescheduled for " + lockedSc.getTurf().getName()
+                    + " (" + lockedSc.getName() + ") to " + newBookingDate);
+            notificationRepository.save(notif);
+
+            // 5. Return 200 per API_DOC.
+            List<RescheduleConfirmResponse.SlotWithRate> responseSlots = newSlots.stream()
+                    .map(s -> new RescheduleConfirmResponse.SlotWithRate(
+                            TIME_FMT.format(s[0]), TIME_FMT.format(s[1]),
+                            lockedSc.getHourlyPrice()))
+                    .collect(Collectors.toList());
+            return new RescheduleConfirmResponse(
+                    booking.getId(), booking.getStatus().name(), true,
+                    oldBookingDateStr, newBookingDate.toString(),
+                    responseSlots, serverNewTotal, serverPriceDiff,
+                    "REFUND", LocalDateTime.now(IST).toString(),
+                    null, null, refund.getId(), refund.getRazorpayRefundId());
+
         } else {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
                     "Additional-payment reschedule requires the payment flow (6C-iii)");
