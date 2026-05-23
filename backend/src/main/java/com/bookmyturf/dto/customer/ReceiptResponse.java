@@ -14,7 +14,7 @@ public record ReceiptResponse(
         BigDecimal totalAmount,
         BigDecimal commissionAmount,
         BigDecimal ownerPayout,
-        PaymentInfo payment,
+        List<PaymentInfo> payments,
         List<RefundInfo> refunds
 ) {
     public record CustomerInfo(String name, String email, String phone) {}

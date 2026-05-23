@@ -454,9 +454,10 @@ public class BookingService {
         List<BookingSlot> slots = bookingSlotRepository.findByBookingId(bookingId);
         slots.sort(Comparator.comparing(BookingSlot::getStartTime));
 
-        // Payments where booking_id = :bookingId — race-recovery rows (booking_id NULL) excluded
-        // by JPQL equality semantics (NULL != :bookingId in InnoDB).
-        List<Payment> payments = paymentRepository.findByBookingId(bookingId);
+        // SUCCESS payments where booking_id = :bookingId, ordered ASC by createdAt (chronological).
+        // race-recovery rows (booking_id IS NULL) excluded by JPQL equality; non-SUCCESS rows excluded
+        // by status filter. Multiple rows appear for PAYMENT-rescheduled bookings.
+        List<Payment> payments = paymentRepository.findByBookingIdAndStatus(bookingId, PaymentStatus.SUCCESS);
 
         // Refunds where booking_id = :bookingId — same NULL-exclusion guarantee.
         // Race-recovery refunds (booking_id IS NULL) CANNOT appear on any booking's receipt.
@@ -480,14 +481,14 @@ public class BookingService {
                         s.getRateAtBooking()))
                 .collect(Collectors.toList());
 
-        ReceiptResponse.PaymentInfo paymentInfo = payments.isEmpty() ? null
-                : new ReceiptResponse.PaymentInfo(
-                        payments.get(0).getId(),
-                        payments.get(0).getGatewayTransactionId(),
-                        payments.get(0).getPaymentMethod(),
-                        payments.get(0).getCreatedAt() != null
-                                ? payments.get(0).getCreatedAt().toString() : null,
-                        payments.get(0).getAmount());
+        List<ReceiptResponse.PaymentInfo> paymentInfos = payments.stream()
+                .map(p -> new ReceiptResponse.PaymentInfo(
+                        p.getId(),
+                        p.getGatewayTransactionId(),
+                        p.getPaymentMethod(),
+                        p.getCreatedAt() != null ? p.getCreatedAt().toString() : null,
+                        p.getAmount()))
+                .collect(Collectors.toList());
 
         List<ReceiptResponse.RefundInfo> refundInfos = refunds.stream()
                 .map(r -> new ReceiptResponse.RefundInfo(
@@ -509,7 +510,7 @@ public class BookingService {
                 booking.getTotalAmount(),
                 booking.getCommissionAmount(),
                 ownerPayout,
-                paymentInfo,
+                paymentInfos,
                 refundInfos
         );
     }
@@ -1208,9 +1209,104 @@ public class BookingService {
                         "Reschedule pricing has changed — please re-initiate");
             }
 
-            // 4. Happy-path slot-swap + payment row — deferred to 6C-iii-1b.
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                    "PAYMENT happy path not yet implemented (6C-iii-1b)");
+            // 4. Fetch Razorpay payment method before acquiring the lock (avoids holding
+            //    the lock while making a network call).
+            String additionalPaymentMethod = fetchRazorpayPaymentMethod(req.razorpayPaymentId());
+
+            // 5. ACQUIRE SELECT ... FOR UPDATE on the sub-court row.
+            Long scId = booking.getSubCourt().getId();
+            SubCourt lockedSc = subCourtRepository.findByIdForUpdate(scId)
+                    .orElseThrow(() -> new ResponseStatusException(
+                            HttpStatus.INTERNAL_SERVER_ERROR, "Internal server error"));
+
+            // 6. RACE RE-CHECK under the lock. Same exclusion rule as NONE/REFUND branches.
+            Set<LocalTime> taken = new HashSet<>(bookingSlotRepository.findTakenSlotStartTimesExcluding(
+                    scId, newBookingDate,
+                    List.of(BookingStatus.CONFIRMED, BookingStatus.COMPLETED), bookingId));
+            if (newSlots.stream().anyMatch(s -> taken.contains(s[0]))) {
+                // 6C-iii-1b placeholder — race-after-payment leaves the captured additional
+                // payment in a stuck state; 6C-iii-2 will refund it via Razorpay and write
+                // committed recovery rows (booking_id NOT NULL).
+                throw new ResponseStatusException(HttpStatus.CONFLICT,
+                        "Selected slot is no longer available; additional payment refund deferred to 6C-iii-2");
+            }
+
+            // 7. HAPPY PATH — one outer @Transactional covers all DB writes.
+
+            // 7a. Delete existing booking_slots.
+            List<BookingSlot> existingSlots = bookingSlotRepository.findByBookingId(bookingId);
+            int deletedCount = existingSlots.size();
+            bookingSlotRepository.deleteAll(existingSlots);
+            // Flush before insert: same uq_active_slot self-collision fix as 6C-ii-2/ii-3.
+            bookingSlotRepository.flush();
+
+            // 7b. Insert new booking_slots with all denormalized fields + slot_active=1.
+            for (LocalTime[] slot : newSlots) {
+                BookingSlot bs = new BookingSlot();
+                bs.setBooking(booking);
+                bs.setStartTime(slot[0]);
+                bs.setEndTime(slot[1]);
+                bs.setRateAtBooking(lockedSc.getHourlyPrice());
+                bs.setSubCourt(lockedSc);
+                bs.setBookingDate(newBookingDate);
+                bs.setSlotActive(1);
+                bookingSlotRepository.save(bs);
+            }
+            log.info("Reschedule PAYMENT booking {}: {} old slot(s) deleted, {} new slot(s) inserted",
+                    bookingId, deletedCount, newSlots.size());
+
+            // 7c. Update booking: date, total, commission (all INCREASED for PAYMENT case).
+            String oldBookingDateStr = booking.getBookingDate().toString();
+            BigDecimal newCommission = serverNewTotal
+                    .multiply(commissionRate).setScale(2, RoundingMode.HALF_UP);
+            booking.setBookingDate(newBookingDate);
+            booking.setTotalAmount(serverNewTotal);
+            booking.setCommissionAmount(newCommission);
+            // Status STAYS CONFIRMED.
+            bookingRepository.save(booking);
+
+            // 7d. Update payout: INCREASED amount + IST-aligned scheduled_at for new slot end.
+            LocalTime lastSlotEnd = newSlots.get(newSlots.size() - 1)[1];
+            Instant newScheduledAtInstant = newBookingDate.atTime(lastSlotEnd)
+                    .atZone(IST).toInstant().plus(payoutHoldHours, ChronoUnit.HOURS);
+            BigDecimal ownerPayoutAmount = serverNewTotal.subtract(newCommission);
+            payoutRepository.findByBookingId(bookingId).ifPresent(payout -> {
+                payout.setAmount(ownerPayoutAmount);
+                payout.setScheduledAt(LocalDateTime.ofInstant(newScheduledAtInstant, IST));
+                payoutRepository.save(payout);
+            });
+
+            // 7e. Write new payments row for the additional charge.
+            //     amount = serverPriceDiff (the additional amount, NOT the new total).
+            //     booking_id NOT NULL — this is a real booking payment, not a race-recovery row.
+            Payment additionalPayment = new Payment();
+            additionalPayment.setBooking(booking);
+            additionalPayment.setAmount(serverPriceDiff);
+            additionalPayment.setGatewayTransactionId(req.razorpayPaymentId());
+            additionalPayment.setStatus(PaymentStatus.SUCCESS);
+            additionalPayment.setPaymentMethod(additionalPaymentMethod);
+            additionalPayment = paymentRepository.save(additionalPayment);
+
+            // 7f. Owner notification — DECISIONS §5: no customer-facing notification.
+            Notification notif = new Notification();
+            notif.setUser(lockedSc.getTurf().getOwner());
+            notif.setType("BOOKING_RESCHEDULED");
+            notif.setMessage("Booking rescheduled for " + lockedSc.getTurf().getName()
+                    + " (" + lockedSc.getName() + ") to " + newBookingDate);
+            notificationRepository.save(notif);
+
+            // 8. Return 200.
+            List<RescheduleConfirmResponse.SlotWithRate> responseSlots = newSlots.stream()
+                    .map(s -> new RescheduleConfirmResponse.SlotWithRate(
+                            TIME_FMT.format(s[0]), TIME_FMT.format(s[1]),
+                            lockedSc.getHourlyPrice()))
+                    .collect(Collectors.toList());
+            return new RescheduleConfirmResponse(
+                    booking.getId(), booking.getStatus().name(), true,
+                    oldBookingDateStr, newBookingDate.toString(),
+                    responseSlots, serverNewTotal, serverPriceDiff,
+                    "PAYMENT", LocalDateTime.now(IST).toString(),
+                    additionalPayment.getId(), req.razorpayPaymentId(), null, null);
         }
     }
 
