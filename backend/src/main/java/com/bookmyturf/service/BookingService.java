@@ -6,8 +6,12 @@ import com.bookmyturf.dto.customer.ConfirmBookingResponse;
 import com.bookmyturf.dto.customer.InitiateBookingRequest;
 import com.bookmyturf.dto.customer.InitiateBookingResponse;
 import com.bookmyturf.dto.customer.ReceiptResponse;
+import com.bookmyturf.dto.customer.RescheduleConfirmRequest;
+import com.bookmyturf.dto.customer.RescheduleConfirmResponse;
 import com.bookmyturf.dto.customer.RescheduleInitiateRequest;
 import com.bookmyturf.dto.customer.RescheduleInitiateResponse;
+import io.jsonwebtoken.Claims;
+import io.jsonwebtoken.JwtException;
 import com.bookmyturf.model.*;
 import com.bookmyturf.repository.*;
 import com.bookmyturf.security.JwtUtil;
@@ -831,6 +835,126 @@ public class BookingService {
                 razorpayOrderId,
                 "PAYMENT".equals(actionRequired) ? razorpayKeyId : null
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Endpoint 6: reschedule/confirm — skeleton (6C-ii-1).
+    //   • Token validation (5 checks → same 400, no leak)
+    //   • Pre-checks (existence, ownership, status, future-slot)
+    //   • Server pricing re-derivation + divergence guard (409)
+    //   • Branch dispatch — all three branches are 400 stubs in this sub-phase.
+    //     6C-ii-2 (NONE), 6C-ii-3 (REFUND), 6C-iii (PAYMENT) fill them in.
+    //   Zero DB writes and zero Razorpay calls on every code path.
+    // -------------------------------------------------------------------------
+
+    @Transactional
+    public RescheduleConfirmResponse rescheduleConfirm(
+            User customer, Long bookingId, RescheduleConfirmRequest req) {
+
+        // ── TOKEN VALIDATION ──────────────────────────────────────────────────
+        // Check 1 (HMAC sig) + Check 3 (not expired): both enforced by parseClaims().
+        // SignatureException and ExpiredJwtException both extend JwtException, so one
+        // catch block covers both while preserving jjwt's internal ordering (sig → exp).
+        // All five checks produce the same 400 body — no information leak about which failed.
+        Claims tc;
+        try {
+            tc = jwtUtil.parseClaims(req.rescheduleToken());
+        } catch (JwtException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Invalid or expired reschedule token");
+        }
+
+        // Check 2: type == "RESCHEDULE" (rejects auth tokens used here by mistake)
+        if (!"RESCHEDULE".equals(tc.get("type", String.class))) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Invalid or expired reschedule token");
+        }
+
+        // Check 4: token.customer_id == calling customer (cross-customer guard)
+        Object rawCId = tc.get("customer_id");
+        Object rawBId = tc.get("booking_id");
+        if (rawCId == null || rawBId == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Invalid or expired reschedule token");
+        }
+        Long tokenCustomerId = ((Number) rawCId).longValue();
+        if (!tokenCustomerId.equals(customer.getId())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Invalid or expired reschedule token");
+        }
+
+        // Check 5: token.booking_id == path parameter {id}
+        Long tokenBookingId = ((Number) rawBId).longValue();
+        if (!tokenBookingId.equals(bookingId)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Invalid or expired reschedule token");
+        }
+
+        // ── Extract remaining token claims ────────────────────────────────────
+        LocalDate newBookingDate = LocalDate.parse(tc.get("new_booking_date", String.class));
+        List<LocalTime[]> newSlots = decodeSlotsEncoded(tc.get("new_slots_json", String.class));
+        BigDecimal tokenPriceDiff = new BigDecimal(tc.get("price_diff", String.class));
+
+        // ── PRE-CHECKS ────────────────────────────────────────────────────────
+        // 1. Booking exists + customer owns it → 404 (no-leak)
+        Booking booking = bookingRepository.findById(bookingId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND,
+                        "Booking not found"));
+        if (!booking.getCustomer().getId().equals(customer.getId())) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Booking not found");
+        }
+
+        // 2. Status guard — CONFIRMED only
+        if (booking.getStatus() != BookingStatus.CONFIRMED) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Only confirmed bookings can be rescheduled");
+        }
+
+        // 3. New-slot-in-future guard — IST-aligned Instant comparison.
+        //    Same tz-safety pattern as 6B cancel and 6C-i: resolve wall-clock IST to UTC
+        //    Instant before comparing to Instant.now(). Do NOT compare LocalDateTime to
+        //    LocalDateTime relying on the JVM default zone.
+        LocalTime newEarliestStart = newSlots.stream()
+                .map(s -> s[0])
+                .min(LocalTime::compareTo)
+                .orElseThrow(() -> new ResponseStatusException(
+                        HttpStatus.INTERNAL_SERVER_ERROR, "Internal server error"));
+        Instant newSlotInstant = newBookingDate.atTime(newEarliestStart).atZone(IST).toInstant();
+        if (!Instant.now().isBefore(newSlotInstant)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Cannot reschedule to a slot whose start time has passed");
+        }
+
+        // ── SERVER PRICING RE-DERIVATION ──────────────────────────────────────
+        // Re-derive from live DB values; the token's amounts are trusted only for
+        // divergence detection, never used as the authoritative business figures.
+        SubCourt sc = booking.getSubCourt();
+        BigDecimal serverNewTotal = sc.getHourlyPrice()
+                .multiply(BigDecimal.valueOf(newSlots.size()));
+        BigDecimal serverPriceDiff = serverNewTotal.subtract(booking.getTotalAmount());
+
+        // Divergence check: if the sub-court rate changed in the 15-min window, the
+        // token's price_diff no longer matches — reject and ask the customer to re-initiate.
+        if (serverPriceDiff.compareTo(tokenPriceDiff) != 0) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Reschedule pricing has changed — please re-initiate");
+        }
+
+        // ── BRANCH DISPATCH ───────────────────────────────────────────────────
+        // Server-computed diff drives branch selection (not the token claim).
+        int cmp = serverPriceDiff.compareTo(BigDecimal.ZERO);
+        String serverActionRequired = cmp == 0 ? "NONE" : cmp < 0 ? "REFUND" : "PAYMENT";
+
+        if ("NONE".equals(serverActionRequired)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Equal-case reschedule confirm not yet implemented (6C-ii-2)");
+        } else if ("REFUND".equals(serverActionRequired)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Refund-case reschedule confirm not yet implemented (6C-ii-3)");
+        } else {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Additional-payment reschedule requires the payment flow (6C-iii)");
+        }
     }
 
     // ── Cancel helpers ────────────────────────────────────────────────────────

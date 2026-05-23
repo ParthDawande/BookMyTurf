@@ -19,11 +19,16 @@ public class JwtUtil {
 
     private final SecretKey key;
     private final long expirationMs;
+    // TODO: Remove app.reschedule.token-expiry-seconds override once expiry testing is complete.
+    // Production default is 900s (15 min). Override only in application-local.properties (gitignored).
+    private final long rescheduleTokenExpirySeconds;
 
     public JwtUtil(@Value("${app.jwt.secret}") String secret,
-                   @Value("${app.jwt.expiration}") long expirationMs) {
+                   @Value("${app.jwt.expiration}") long expirationMs,
+                   @Value("${app.reschedule.token-expiry-seconds:900}") long rescheduleTokenExpirySeconds) {
         this.key = Keys.hmacShaKeyFor(secret.getBytes());
         this.expirationMs = expirationMs;
+        this.rescheduleTokenExpirySeconds = rescheduleTokenExpirySeconds;
     }
 
     public String generateToken(Long userId, Role role, UserStatus status) {
@@ -71,7 +76,7 @@ public class JwtUtil {
                 .claim("price_diff", priceDiff.toPlainString())
                 .claim("razorpay_order_id", razorpayOrderId)
                 .issuedAt(Date.from(now))
-                .expiration(Date.from(now.plusSeconds(900)))
+                .expiration(Date.from(now.plusSeconds(rescheduleTokenExpirySeconds)))
                 .signWith(key)
                 .compact();
     }

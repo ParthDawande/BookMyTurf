@@ -6,6 +6,8 @@ import com.bookmyturf.dto.customer.ConfirmBookingResponse;
 import com.bookmyturf.dto.customer.InitiateBookingRequest;
 import com.bookmyturf.dto.customer.InitiateBookingResponse;
 import com.bookmyturf.dto.customer.ReceiptResponse;
+import com.bookmyturf.dto.customer.RescheduleConfirmRequest;
+import com.bookmyturf.dto.customer.RescheduleConfirmResponse;
 import com.bookmyturf.dto.customer.RescheduleInitiateRequest;
 import com.bookmyturf.dto.customer.RescheduleInitiateResponse;
 import com.bookmyturf.model.User;
@@ -61,5 +63,13 @@ public class BookingController {
             @PathVariable Long id,
             @Valid @RequestBody RescheduleInitiateRequest req) {
         return ResponseEntity.ok(bookingService.rescheduleInitiate(user, id, req));
+    }
+
+    @PutMapping("/{id}/reschedule/confirm")
+    public ResponseEntity<RescheduleConfirmResponse> rescheduleConfirm(
+            @AuthenticationPrincipal User user,
+            @PathVariable Long id,
+            @Valid @RequestBody RescheduleConfirmRequest req) {
+        return ResponseEntity.ok(bookingService.rescheduleConfirm(user, id, req));
     }
 }
