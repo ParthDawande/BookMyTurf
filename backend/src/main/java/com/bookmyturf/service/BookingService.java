@@ -946,8 +946,87 @@ public class BookingService {
         String serverActionRequired = cmp == 0 ? "NONE" : cmp < 0 ? "REFUND" : "PAYMENT";
 
         if ("NONE".equals(serverActionRequired)) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                    "Equal-case reschedule confirm not yet implemented (6C-ii-2)");
+            Long scId = booking.getSubCourt().getId();
+
+            // 1. Lock sub-court row to serialise concurrent reschedule confirms.
+            SubCourt lockedSc = subCourtRepository.findByIdForUpdate(scId)
+                    .orElseThrow(() -> new ResponseStatusException(
+                            HttpStatus.INTERNAL_SERVER_ERROR, "Internal server error"));
+
+            // 2. Re-check availability under lock, excluding this booking's own slots.
+            Set<LocalTime> taken = new HashSet<>(bookingSlotRepository.findTakenSlotStartTimesExcluding(
+                    scId, newBookingDate,
+                    List.of(BookingStatus.CONFIRMED, BookingStatus.COMPLETED),
+                    bookingId));
+            if (newSlots.stream().anyMatch(s -> taken.contains(s[0]))) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT,
+                        "Selected slot is no longer available");
+            }
+
+            // 3. Delete existing booking_slots.
+            List<BookingSlot> existingSlots = bookingSlotRepository.findByBookingId(bookingId);
+            int deletedCount = existingSlots.size();
+            bookingSlotRepository.deleteAll(existingSlots);
+            // Flush before insert: when rescheduling to the same date/slots, Hibernate may
+            // buffer the deletes and attempt the inserts first, triggering uq_active_slot.
+            bookingSlotRepository.flush();
+
+            // 4. Insert new booking_slots with all denormalized fields + slot_active=1.
+            for (LocalTime[] slot : newSlots) {
+                BookingSlot bs = new BookingSlot();
+                bs.setBooking(booking);
+                bs.setStartTime(slot[0]);
+                bs.setEndTime(slot[1]);
+                bs.setRateAtBooking(lockedSc.getHourlyPrice());
+                bs.setSubCourt(lockedSc);
+                bs.setBookingDate(newBookingDate);
+                bs.setSlotActive(1);
+                bookingSlotRepository.save(bs);
+            }
+            log.info("Reschedule NONE booking {}: {} old slot(s) deleted, {} new slot(s) inserted",
+                    bookingId, deletedCount, newSlots.size());
+
+            // 5-7. Update booking: date, total, commission.
+            String oldBookingDateStr = booking.getBookingDate().toString();
+            BigDecimal newCommission = serverNewTotal
+                    .multiply(commissionRate).setScale(2, RoundingMode.HALF_UP);
+            booking.setBookingDate(newBookingDate);
+            booking.setTotalAmount(serverNewTotal);
+            booking.setCommissionAmount(newCommission);
+            bookingRepository.save(booking);
+
+            // 8. Update payout: new amount + IST-aligned scheduled_at.
+            LocalTime lastSlotEnd = newSlots.get(newSlots.size() - 1)[1];
+            Instant newScheduledAtInstant = newBookingDate.atTime(lastSlotEnd)
+                    .atZone(IST).toInstant().plus(payoutHoldHours, ChronoUnit.HOURS);
+            BigDecimal ownerPayoutAmount = serverNewTotal.subtract(newCommission);
+            payoutRepository.findByBookingId(bookingId).ifPresent(payout -> {
+                payout.setAmount(ownerPayoutAmount);
+                payout.setScheduledAt(LocalDateTime.ofInstant(newScheduledAtInstant, IST));
+                payoutRepository.save(payout);
+            });
+
+            // 9. Owner notification — DECISIONS §5: no customer notification for reschedule.
+            Notification notif = new Notification();
+            notif.setUser(lockedSc.getTurf().getOwner());
+            notif.setType("BOOKING_RESCHEDULED");
+            notif.setMessage("Booking rescheduled for " + lockedSc.getTurf().getName()
+                    + " (" + lockedSc.getName() + ") to " + newBookingDate);
+            notificationRepository.save(notif);
+
+            // 10. Return 200.
+            List<RescheduleConfirmResponse.SlotWithRate> responseSlots = newSlots.stream()
+                    .map(s -> new RescheduleConfirmResponse.SlotWithRate(
+                            TIME_FMT.format(s[0]), TIME_FMT.format(s[1]),
+                            lockedSc.getHourlyPrice()))
+                    .collect(Collectors.toList());
+            return new RescheduleConfirmResponse(
+                    booking.getId(), booking.getStatus().name(), true,
+                    oldBookingDateStr, newBookingDate.toString(),
+                    responseSlots, serverNewTotal, serverPriceDiff,
+                    "NONE", LocalDateTime.now(IST).toString(),
+                    null, null, null, null);
+
         } else if ("REFUND".equals(serverActionRequired)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
                     "Refund-case reschedule confirm not yet implemented (6C-ii-3)");
