@@ -1,285 +1,289 @@
-PHASE 6C-iii-1b of 4 — PAYMENT-case reschedule confirm: HAPPY PATH
-+ temporary race-after-payment placeholder.
+PHASE 6C-iii-2 of 4 — race-after-additional-payment AUTO-REFUND.
 
-Standing rules apply. Stop and report. Do NOT start 6C-iii-2. Reuse
+Standing rules apply. Stop and report. Do NOT start 6C-iii-3. Reuse
 Phase 0 error shape and Phase 2 security UNCHANGED. No 422. Real
-executed verification — REAL additional Razorpay test payment via
-the test-payment recipe, raw DB SELECT output, no traced values.
+executed verification — REAL forced race, REAL Razorpay refund of
+the additional payment, raw DB SELECT output, no traced values.
 
-SCOPE: replace 6C-iii-1a's fall-through placeholder with the real
-PAYMENT happy path: lock → race re-check → slot swap → new payments
-row → commission/payout recompute → owner notification. PLUS a
-temporary 409 placeholder when a race is detected after the customer
-already paid (6C-iii-2 replaces that placeholder with real
-auto-refund of the additional payment).
+SCOPE: replace the 6C-iii-1b race-after-payment placeholder with
+the real Option A flow:
+- detect race under SELECT FOR UPDATE,
+- call Razorpay refund FIRST for the additional payment that was
+  captured before this confirm,
+- write committed payments + refunds recovery rows via REQUIRES_NEW
+  (separate connection, surviving the booking transaction's rollback),
+- both recovery rows have booking_id NOT NULL (Q1a decision —
+  audit trail tied to the booking the customer paid against),
+- return 409 with standard body.
 
-If you find yourself writing race-auto-refund / FAILED-record /
-REQUIRES_NEW recovery code for the additional payment, STOP — wrong
-sub-phase. The race case in 6C-iii-1b is a STUB that knowingly
-leaves the captured payment stuck (documented).
+If you find yourself writing 502 / refund-failure / FAILED-record
+code, STOP — that's 6C-iii-3.
 
-=== Context — what is already in place ===
-- 6C-iii-1a wired three rejection paths in the PAYMENT branch:
-  null-field validation, signature verification, order-notes
-  mismatch. All execute before any lock or DB write.
-- After those three checks pass, control reaches the placeholder
-  6C-iii-1a put there ("PAYMENT happy path not yet implemented
-  (6C-iii-1b)"). This sub-phase replaces that placeholder.
-- The reschedule-token validation, pre-checks, pricing
-  re-derivation, and branch dispatch from 6C-ii-1 are unchanged.
+=== LOCKED DESIGN ===
+- Sequence A: Razorpay refund of the additional charge FIRST, then
+  commit recovery rows via REQUIRES_NEW. If the booking @Transactional
+  rolls back (the booking side does nothing on race), the recovery
+  rows must survive because they're written on a separate connection
+  that committed independently. Same pattern as 5C-2b.
+- Q1a: recovery rows' booking_id is NOT NULL (set to this booking).
+  This is the deliberate distinction from 5C-2b race-recovery rows
+  (which have booking_id IS NULL because no booking exists). Here a
+  booking DOES exist and the customer paid against it specifically;
+  the recovery rows belong to that booking's audit trail.
+- The booking's own state (slots, total, commission, payout,
+  notifications, status) MUST remain completely unchanged. The
+  booking transaction creates zero booking-side rows AND modifies
+  zero existing booking rows. Only the REQUIRES_NEW recovery rows
+  are written, and they're new payments + refunds rows, not edits
+  to the booking.
+- Booking status stays CONFIRMED throughout. The reschedule did
+  not happen; the original booking is intact and playable.
+- opaque payment_method (Phase 1 Option B carried contract): the
+  recovery payments row stores whatever Razorpay returned as the
+  method, AS-IS varchar.
 
-=== PAYMENT happy-path flow (replaces the 6C-iii-1a placeholder) ===
-After 6C-iii-1a's three rejection paths all pass:
+=== Race-after-payment flow (replaces 6C-iii-1b's placeholder) ===
 
-1. ACQUIRE SELECT ... FOR UPDATE on the sub-court row. Same locking
-   query as 5B confirm / 6C-ii-2 / 6C-ii-3.
+After 6C-iii-1a's three rejection paths pass, the outer
+@Transactional starts, SELECT FOR UPDATE on the sub-court row
+acquires, and the race re-check runs (excluding own slots). If
+any proposed new slot is taken by another CONFIRMED/COMPLETED
+booking:
 
-2. RACE RE-CHECK under the lock. Same status-derived availability
-   rule from 5A/5B/6C-ii (slot taken if any other booking has a
-   CONFIRMED/COMPLETED booking_slots row at the same
-   sub_court_id+booking_date+start_time). Exclude THIS booking's
-   own existing slots (self-collision exclusion same as
-   6C-ii-2/ii-3).
+1. CALL RAZORPAY REFUND of the additional-charge payment FIRST.
+   The payment_id is razorpay_payment_id from the request (the
+   customer just paid). Refund the FULL captured amount (which
+   equals serverPriceDiff for this case).
+   razorpayClient.payments.refund(paymentId, {amount: paise}).
+   Wrap in try/catch on RazorpayException + IOException.
 
-3. ON RACE DETECTED — TEMPORARY 6C-iii-1b placeholder:
-   - Throw ResponseStatusException(CONFLICT) with body
-     {"error":"Selected slot is no longer available; additional
-     payment refund deferred to 6C-iii-2"}.
-   - Outer transaction rolls back — no slot delete/insert, no new
-     payments row, no payouts/notifications writes.
-   - The customer's additional Razorpay payment is now stuck-
-     captured (real money captured, slots gone, no DB record of
-     the captured payment). This is the deliberate 6C-iii-1b
-     residue — 6C-iii-2 replaces this throw with real auto-refund
-     + committed payments+refunds recovery rows (booking_id NOT
-     NULL per Q1a).
-   - Add a clear code comment exactly:
-     "6C-iii-1b placeholder — race-after-payment leaves the
-     captured additional payment in a stuck state; 6C-iii-2 will
-     refund it via Razorpay and write committed recovery rows
-     (booking_id NOT NULL)."
+2. ON REFUND FAILURE: rethrow as 502 with the standard body
+   {"error":"Payment refund could not be processed"}. 6C-iii-2
+   does NOT write a FAILED record here — 6C-iii-3 will harden
+   that path using the 5C-3/6B-ii pattern. Add code comment:
+   "6C-iii-2: race-after-payment refund failure rethrows 502 with
+   no FAILED record; 6C-iii-3 writes the FAILED recovery row
+   using REQUIRES_NEW."
 
-4. ON NO RACE — HAPPY PATH, in ONE outer @Transactional:
-   a. DELETE all existing booking_slots rows for this booking
-      (deleteAll(existingSlots)). State count.
-   b. bookingSlotRepository.flush()  ← REQUIRED. Same fix as
-      6C-ii-2 / 6C-ii-3 — without it the uq_active_slot backstop
-      fires on self-collision PAYMENT cases.
-   c. INSERT new booking_slots rows. Each MUST have:
-      - booking_id = this booking;
-      - start_time, end_time from the token's new_slots_json;
-      - rate_at_booking = the CURRENT sub_court.hourly_rate (NOT
-        a value from the token or the Razorpay order's notes);
-      - sub_court_id = booking.sub_court.id (Phase 1 backstop,
-        denormalized, NON-NULL);
-      - booking_date = new_booking_date from the token (NON-NULL);
-      - slot_active = 1.
-      State count inserted.
-   d. Update bookings.booking_date if it differs from the
-      current one.
-   e. Update bookings.total_amount = serverNewTotal (INCREASED
-      from the original total).
-   f. Recompute bookings.commission_amount =
-      round(serverNewTotal × <app.platform.commission-rate>, 2,
-      RoundingMode.HALF_UP). The new commission is HIGHER than
-      the original because total is higher. Quote the line and
-      state the calculated value for the test case.
-   g. Update payouts row for this booking:
-      - amount = serverNewTotal - new commission_amount
-        (INCREASED owner payout).
-      - scheduled_at = (new_booking_date at last_slot_end_time)
-        .atZone(ZoneId.of("Asia/Kolkata"))
-        .toInstant()
-        .plus(<app.payout.hold-hours>, ChronoUnit.HOURS).
-      Quote the line. Same Asia/Kolkata pattern as 6B/6C-ii-2/ii-3.
-   h. WRITE A NEW payments ROW for the additional-charge payment:
-      - booking_id = this booking (NOT NULL — this is an
-        additional-charge payment tied to a real booking; it is
-        NOT a race-recovery row).
-      - razorpay_payment_id = razorpay_payment_id from the
-        request body.
-      - gateway_transaction_id = same value (mirror 5B/6B's
-        convention — state which column(s) hold the Razorpay
-        id, if your schema separates them).
-      - amount = the ADDITIONAL CHARGE amount, which is
-        serverPriceDiff (NOT serverNewTotal, NOT serverOldTotal).
-        For a 1200 → 1800 reschedule, this row is 600.00.
-      - status = SUCCESS.
-      - payment_method = whatever Razorpay returned for this
-        payment, stored AS-IS opaque VARCHAR. NO whitelist, NO
-        rejecting enum. Carried contract from Phase 5
-        (Option B — proven across runs returning card,
-        netbanking, etc.).
-      The booking now has TWO SUCCESS payments rows: the
-      ORIGINAL (booking_id, status=SUCCESS, original
-      razorpay_payment_id, amount = original total) AND this
-      NEW one (booking_id same, status=SUCCESS, new payment_id,
-      amount = price_diff). Both have booking_id set NOT NULL.
-   i. bookings.status STAYS CONFIRMED. Do NOT set REFUNDED, do
-      NOT set anything else. The reschedule succeeded; the
-      booking's status didn't change.
-   j. Emit OWNER notification: BOOKING_RESCHEDULED (same type as
-      EQUAL/REFUND). Owner-directed per §5; ZERO customer-facing
-      notification.
+3. ON REFUND SUCCESS: call the recovery service (extending
+   RaceRefundRecoveryService or whatever you named it) to write
+   the recovery rows via REQUIRES_NEW. The recovery method:
+   - Take parameters: bookingId, razorpayPaymentId, razorpayRefundId,
+     amount, paymentMethod (opaque string from Razorpay).
+   - Inside the REQUIRES_NEW @Transactional method:
+     a. Create a payments row:
+        - booking_id = the bookingId (NOT NULL — Q1a).
+          State explicitly that this differs from the 5C-2b race
+          recovery where booking_id was NULL.
+        - razorpay_payment_id = the razorpayPaymentId.
+        - gateway_transaction_id = same value (mirror existing
+          payments-row convention from 5B/6B/6C-iii-1b).
+        - amount = the captured-then-refunded amount.
+        - status = SUCCESS (the CAPTURE succeeded; only the
+          reschedule didn't go through; this row records the
+          captured payment).
+        - payment_method = the opaque string Razorpay returned
+          (carried contract; no whitelist or rejecting enum).
+     b. Create a refunds row:
+        - booking_id = the same bookingId (NOT NULL).
+        - payment_id = the just-written payments row's id.
+        - razorpay_refund_id = the refund id from the Razorpay
+          response.
+        - amount = same as the payment amount.
+        - status = SUCCESS (the refund completed).
+     c. Both rows committed independently via REQUIRES_NEW —
+        they survive the outer booking @Transactional's rollback.
 
-5. Return per API_DOC. The response should include enough for
-   the client to know the reschedule succeeded — at minimum the
-   new booking state.
+4. AFTER the REQUIRES_NEW commit returns: throw
+   ResponseStatusException(CONFLICT) with body
+   {"error":"Selected slot is no longer available"}. The outer
+   @Transactional rolls back — the booking side did nothing
+   (no slot delete, no slot insert, no booking total change, no
+   payout change, no notification). The recovery rows from step 3
+   are already committed on a different connection; they survive.
 
-=== Do NOT in 6C-iii-1b ===
-- No race-after-payment auto-refund (6C-iii-2). The race case
-  uses the documented stub.
-- No FAILED-record writing (6C-iii-3 — covers both the
-  reschedule-refund FAILED record AND the PAYMENT
-  refund-itself-fails FAILED record).
+5. The customer sees 409, their money has been returned
+   (Razorpay refund succeeded), and the DB has a queryable record
+   of "this customer paid X additional toward a reschedule that
+   didn't happen; the money was refunded." Reconciliation works:
+   SELECT * FROM payments WHERE booking_id IS NOT NULL is the
+   booking's payment audit trail; the additional-charge-then-
+   refunded entry is visible.
+
+=== Do NOT in 6C-iii-2 ===
+- No FAILED record on refund failure (6C-iii-3).
 - Do not modify EQUAL or REFUND branches.
 - Do not modify 6C-iii-1a's three rejection paths.
-- Do not modify token validation, pre-checks, or pricing
-  re-derivation from 6C-ii-1.
+- Do not modify 6C-iii-1b's happy path (the no-race case is
+  unchanged; only the race-detected branch changes).
+- Do not modify the fault-injection flag wiring (3 sites today;
+  6C-iii-3 may add a 4th).
 - No customer-facing notifications (§5).
-- Do not modify the fault-injection flag wiring (3 sites
-  currently; 6C-iii-2 may add a 4th for the additional-charge
-  refund call).
 
-=== VERIFICATION — all REAL executed, raw SELECT output ===
+=== VERIFICATION — REAL executed forced race, raw output ===
 
-1. Files modified; the PAYMENT branch's exact final ordering
-   showing the three 6C-iii-1a rejection paths, then the lock
-   acquisition, then the race re-check (with stub placeholder),
-   then the happy path. Quote:
-   (a) the deleteAll → flush → insert sequence (proving the
-       6C-ii-2 fix is carried forward);
-   (b) the new payments-row write showing booking_id is set to
-       the booking and the AMOUNT is the price_diff (not the
-       new total);
-   (c) the payouts.scheduled_at computation;
-   (d) the race-detection placeholder throw with the exact body.
+1. Files modified; the PAYMENT branch's exact ordering showing
+   the race-refund path. Quote:
+   (a) the Razorpay refund call,
+   (b) the call into the REQUIRES_NEW recovery method,
+   (c) the recovery method's payments-row write showing booking_id
+       set NOT NULL,
+   (d) the recovery method's refunds-row write showing booking_id
+       set NOT NULL,
+   (e) the 409 throw after recovery returns.
+   State the transaction boundary explicitly: outer @Transactional
+   (booking) holds the sub-court X lock and writes zero rows on
+   race; inner @Transactional(REQUIRES_NEW) on the recovery service
+   opens a separate connection, commits the two rows, returns.
+   When the outer rolls back from the 409 throw, the inner rows
+   are durably committed on a different connection — the same
+   mechanism that worked in 5C-2b.
 
-2. HAPPY PATH executed end-to-end with a REAL additional payment:
-   a. Pick or stage a CONFIRMED booking with a real SUCCESS
-      payment from earlier phases. State booking id, customer id,
-      current total, current slots, current commission.
-   b. Call POST /reschedule/initiate with MORE slots than
-      currently held (or higher-rate slots if rates vary) so
-      action_required == "PAYMENT". Show the raw initiate
-      response: razorpay_order_id, key_id, amount in paise,
-      reschedule_token.
-   c. LIVE-fetch the Razorpay order to prove it's real (same
-      verification standard as 6C-i): show the order's id,
-      amount, currency, status, notes verbatim.
-   d. Pay the additional amount using the test-payment recipe
-      (test-harness/RAZORPAY_TEST_PAYMENT_RECIPE.md if you
-      committed it; otherwise reconstruct from memory). State
-      which card/UPI rail you used. Capture the three Razorpay
-      values returned.
-   e. Within 15 min of initiate, call confirm with the
-      reschedule token AND the three Razorpay values. Show raw
-      HTTP response.
+2. STUCK PAYMENT CLEANUP — proof that the existing residue from
+   6C-iii-1b test 3 can now be cleaned up by the new code:
+   This is informational, not strictly part of the new test. The
+   payment pay_SskYkJWFnPFriw (600 INR, captured, no DB row) from
+   6C-iii-1b test 3 is the kind of state this sub-phase is
+   designed to prevent in future. Note: you do NOT need to
+   retroactively refund pay_SskYkJWFnPFriw via the new code path
+   (the booking 22 it was attached to may not have stable state).
+   Either:
+   (a) Manually refund pay_SskYkJWFnPFriw via the Razorpay
+       dashboard or a direct SDK call, just to clear the test
+       residue. State if you did.
+   (b) Leave it stuck — it's test-mode money, no consequence.
+   State which you did, but the NEW forced-race test below
+   produces a fresh case that exercises the new code.
+
+3. FORCED RACE WITH AUTO-REFUND, executed end-to-end:
+   a. Pick or stage a fresh CONFIRMED booking with a real SUCCESS
+      payment. Initiate a PAYMENT reschedule (more slots so
+      action_required = PAYMENT). State the booking id, the
+      original total, the initiate response (razorpay_order_id,
+      reschedule_token).
+   b. Live-fetch the Razorpay order to prove it's real. Show
+      its amount, status, notes.
+   c. Pay the additional charge via the test-payment recipe.
+      Capture the three Razorpay values returned. State the new
+      razorpay_payment_id.
+   d. BEFORE calling confirm, insert a blocker booking on one
+      of the proposed new slots (forced-race pattern, same as
+      5C-2a / 6C-ii-2 / 6C-iii-1b test 3). State the blocker
+      insert.
+   e. Call confirm with the reschedule token + three real
+      Razorpay values. Show raw HTTP response.
    f. Razorpay live state for the additional-charge payment:
-      status=captured, amount==price_diff_in_paise. Fetch live.
+      Fetch live. Expectations: status=refunded (or captured-
+      with-amount_refunded equal to the captured amount, terms
+      vary by Razorpay version — show what you see),
+      amount_refunded == amount paid, refund_status full.
+      State the refund_id returned.
    g. Raw SELECT post-request, paste the actual query results,
-      not a summary table:
+      not a summary:
       - SELECT id, status, total_amount, commission_amount,
         booking_date FROM bookings WHERE id = <booking>;
-        Expectations: status=CONFIRMED (NOT REFUNDED, NOT
-        anything else), total_amount = serverNewTotal
-        (INCREASED), commission_amount = new total × 0.10
-        (INCREASED), booking_date updated if applicable.
+        Expectations: status STILL CONFIRMED, total_amount
+        UNCHANGED (the original pre-reschedule total),
+        commission_amount UNCHANGED, booking_date UNCHANGED.
+        The booking is completely unmodified.
       - SELECT id, booking_id, sub_court_id, booking_date,
-        start_time, end_time, rate_at_booking, slot_active
-        FROM booking_slots WHERE booking_id = <booking>;
-        Expectations: ONLY the new slots (old deleted). Each
-        row has non-null sub_court_id, non-null booking_date,
-        slot_active=1, rate_at_booking matches current sub-court
-        rate. State count of rows now present and (separately)
-        the count of rows that were deleted in step 4a.
+        start_time, end_time, slot_active FROM booking_slots
+        WHERE booking_id = <booking>;
+        Expectations: only the ORIGINAL slots remain. No new
+        slots inserted. State the count and verify all original
+        slot_active=1.
       - SELECT id, booking_id, status, amount, payment_method,
-        gateway_transaction_id FROM payments WHERE booking_id
-        = <booking>;
-        Expectations: TWO rows. ROW 1 = the original payment
-        from booking creation: booking_id set, status SUCCESS,
-        amount = original total (e.g. 1200.00), the original
-        Razorpay payment_id. ROW 2 = the additional charge:
-        booking_id set, status SUCCESS, amount = price_diff
-        (e.g. 600.00, NOT 1800.00), the new Razorpay
-        payment_id. Show BOTH rows.
+        gateway_transaction_id, created_at FROM payments WHERE
+        booking_id = <booking> ORDER BY id ASC;
+        Expectations: at least TWO rows. The original payment(s)
+        from booking creation (booking_id set, status SUCCESS,
+        original amount(s)), AND the NEW recovery row from this
+        race (booking_id SET — NOT NULL, status SUCCESS, amount
+        = the additional-charge amount that just got refunded,
+        the new razorpay_payment_id from step c, payment_method
+        opaque text from Razorpay). State the new payments row's
+        full content.
+      - SELECT id, booking_id, payment_id, status, amount,
+        razorpay_refund_id FROM refunds WHERE booking_id =
+        <booking> ORDER BY id ASC;
+        Expectations: a NEW refunds row exists with booking_id
+        set NOT NULL, payment_id linked to the just-written
+        recovery payments row, status SUCCESS, amount = the
+        refunded amount, razorpay_refund_id from Razorpay.
       - SELECT id, booking_id, status, amount, scheduled_at
         FROM payouts WHERE booking_id = <booking>;
-        Expectations: status PENDING (unchanged), amount =
-        new owner_payout (INCREASED), scheduled_at recomputed
-        to (new last slot end + 24h).
-      - SELECT id, booking_id, status, amount, payment_id,
-        razorpay_refund_id FROM refunds WHERE booking_id =
-        <booking>;
-        Expectations: NO new row from this confirm (PAYMENT
-        case is a charge, not a refund). Any existing refund
-        rows from prior reschedules of this booking stay
-        unchanged.
+        Expectations: status PENDING, amount UNCHANGED,
+        scheduled_at UNCHANGED. The payout state is exactly
+        what it was before this confirm attempt.
       - SELECT id, user_id, type FROM notifications WHERE
-        created since the test started;
-        Expectations: exactly ONE new row, user_id = owner of
-        the booking's turf, type = BOOKING_RESCHEDULED. ZERO
-        customer-facing notification types.
+        type LIKE 'BOOKING_%' ORDER BY id DESC LIMIT 5;
+        Expectations: no NEW notification for this confirm
+        (the reschedule didn't happen). Zero customer-facing
+        rows. The most recent BOOKING_-related notifications
+        are unchanged from prior tests.
 
-3. RACE-AFTER-PAYMENT placeholder executed:
-   a. Initiate a PAYMENT case on a different fresh CONFIRMED
-      booking. Pay normally for real.
-   b. BEFORE calling confirm, insert a blocker booking on one
-      of the proposed new slots (same forced-race pattern as
-      5C-2a / 6C-ii-2). State the blocker insert.
-   c. Call confirm with the valid reschedule token + the three
-      real Razorpay values.
-   d. Show raw HTTP 409 with the documented body referencing
-      6C-iii-2.
-   e. Razorpay live state: the additional-charge payment is
-      STILL captured (the deliberate stuck state for 6C-iii-1b).
-      State the Razorpay payment id explicitly so I can track it
-      across to 6C-iii-2.
-   f. Raw SELECT: bookings unchanged (same total, same status,
-      same booking_date), booking_slots unchanged (only the
-      blocker insert is the +1, not from confirm). NO new
-      payments row (the happy-path insert did not run). NO
-      refund row. NO notification.
-   g. State explicitly: this captured payment will be cleaned
-      up (auto-refunded) when 6C-iii-2 replaces the placeholder.
-      For now it's intentional 6C-iii-1b residue, same discipline
-      as 5C-2a leaving a payment captured-but-stuck.
+4. RECEIPT CROSS-CHECK on the booking that just had its race:
+   Call the 6A receipt endpoint. The receipt should now show:
+   - status STILL CONFIRMED;
+   - total_amount UNCHANGED (the original);
+   - the original slot list (NOT the rescheduled slots that
+     were proposed);
+   - the payments array contains the original payment(s) AND
+     the new recovery row from this race (amount = the
+     additional-charge that was refunded) — the customer can
+     see in their receipt that they paid extra for a reschedule
+     that didn't happen and the money was returned;
+   - the refunds array contains the new refund row;
+   - race-recovery refunds from 5C-2b (booking_id IS NULL) are
+     STILL excluded.
+   Show the raw response body. State whether the customer-facing
+   view of this is acceptable (a "captured + refunded" entry
+   appearing on a CONFIRMED booking's receipt is informative
+   but may be confusing — note this as observed behavior, no
+   code change in this sub-phase).
 
-4. RECEIPT CROSS-CHECK for the happy-path test:
-   Call the 6A receipt endpoint on the just-PAYMENT-rescheduled
-   booking. The receipt must now show:
-   - the current (INCREASED) total_amount;
-   - the new slot list (not the old);
-   - status STILL CONFIRMED (not REFUNDED, not anything else);
-   - both SUCCESS payments rows reflected appropriately (per
-     API_DOC's receipt shape — show how the receipt represents
-     two payments for one booking; if the receipt only shows
-     one payment row, state which and why);
-   - NO new refund rows (PAYMENT is a charge);
-   - race-recovery refunds (booking_id IS NULL) still excluded.
+5. REQUIRES_NEW DURABILITY proof:
+   This is the key correctness verification — the recovery rows
+   must survive the outer booking @Transactional's rollback.
+   The 409 response means the outer transaction rolled back.
+   The fact that the SELECTs in item 3 show the recovery rows
+   post-request proves they were committed on a separate
+   connection and survived. State explicitly: "the booking-side
+   transaction rolled back from the 409 throw; the recovery
+   rows visible in the post-request SELECTs are durable because
+   REQUIRES_NEW committed them on a separate connection before
+   the outer rollback."
 
-5. REGRESSION — confirm 6C-ii is intact after 6C-iii-1b's
-   changes:
-   a. One EQUAL reschedule on a different booking → 200 (no
-      refund row, no new payments row, status CONFIRMED).
-   b. One REFUND reschedule on a different booking with a real
-      SUCCESS payment → 200 + real partial Razorpay refund +
-      refunds row with booking_id NOT NULL. Show the refunds
-      row and the live Razorpay refund state.
+6. REFUND-FAILURE PLACEHOLDER:
+   Briefly verify that the 5C-3 fault-injection flag, when
+   enabled, intercepts this NEW Razorpay refund call site too.
+   Set app.test.force-refund-failure=true in
+   application-local.properties. Restart. Run the SAME forced-
+   race scenario (initiate, pay, insert blocker, confirm).
+   Expectations:
+   - Razorpay refund call does NOT happen (flag intercepts).
+   - HTTP 502 with standard body "Payment refund could not be
+     processed".
+   - Booking COMPLETELY UNCHANGED (same expectations as
+     6C-iii-3 will harden — but in 6C-iii-2, NO FAILED record
+     is written; the captured additional payment is stuck again,
+     to be cleaned up by 6C-iii-3's FAILED-record write).
+   State the new captured-but-stuck payment_id so 6C-iii-3 has
+   it as test residue.
+   Set flag back to false. Restart. Confirm production state.
 
-6. CONTRACT-B CROSS-CHECK: the booking that just had a PAYMENT
-   reschedule now has TWO SUCCESS payments rows. Do NOT actually
-   cancel it (would be destructive to the test data) — but state
-   explicitly: per the Phase 6B carried-forward observation, if
-   that booking were now cancelled via DELETE /bookings/{id},
-   6B's cancel logic would refund BOTH payments (the original
-   1200 and the additional 600). This is anticipated, by design,
-   and the carried-forward note from 6B is now empirically
-   relevant. No action required in 6C-iii-1b; flagged for the
-   record.
+7. REGRESSION — confirm 6C-iii-1b's happy path is intact:
+   Run one PAYMENT-case reschedule end-to-end on a fresh
+   booking with NO blocker insertion. Show:
+   - HTTP 200/201;
+   - real Razorpay payment captured (not refunded);
+   - new payments row added (booking_id NOT NULL, amount =
+     price_diff);
+   - slot swap occurred;
+   - new BOOKING_RESCHEDULED notification to owner.
+   This proves the race-path additions didn't break the no-race
+   happy path.
 
-7. §5: across all tests, zero customer-facing notifications.
-   State the count of BOOKING_RESCHEDULED rows created in tests
-   2 and 5 (= 3 total, all to owner).
+8. §5: zero customer-facing notifications across all tests.
 
-Do not begin 6C-iii-2.
+Do not begin 6C-iii-3.

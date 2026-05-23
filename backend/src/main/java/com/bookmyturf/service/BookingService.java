@@ -1224,11 +1224,42 @@ public class BookingService {
                     scId, newBookingDate,
                     List.of(BookingStatus.CONFIRMED, BookingStatus.COMPLETED), bookingId));
             if (newSlots.stream().anyMatch(s -> taken.contains(s[0]))) {
-                // 6C-iii-1b placeholder — race-after-payment leaves the captured additional
-                // payment in a stuck state; 6C-iii-2 will refund it via Razorpay and write
-                // committed recovery rows (booking_id NOT NULL).
+                // RACE DETECTED — the customer already paid the additional charge.
+                // Sequence A: refund Razorpay FIRST, then commit recovery rows via REQUIRES_NEW.
+
+                // 6C-iii-2: Razorpay refund of the additional-charge payment (full amount = serverPriceDiff).
+                JSONObject raceRefundReq = new JSONObject();
+                raceRefundReq.put("amount",
+                        serverPriceDiff.multiply(BigDecimal.valueOf(100)).longValue());
+                com.razorpay.Refund raceRzpRefund;
+                try {
+                    if (forceRefundFailure) {
+                        throw new RazorpayException("test-only: forced refund failure");
+                    }
+                    raceRzpRefund = razorpayClient.payments.refund(
+                            req.razorpayPaymentId(), raceRefundReq);
+                } catch (RazorpayException e) {
+                    // 6C-iii-2: race-after-payment refund failure rethrows 502 with no FAILED
+                    // record; 6C-iii-3 writes the FAILED recovery row using REQUIRES_NEW.
+                    log.error("Razorpay race-refund failed for PAYMENT reschedule booking {} payment {}: {}",
+                            bookingId, req.razorpayPaymentId(), e.getMessage());
+                    throw new ResponseStatusException(HttpStatus.BAD_GATEWAY,
+                            "Payment refund could not be processed");
+                }
+
+                // Refund succeeded — commit recovery rows on a separate connection (REQUIRES_NEW).
+                // booking_id NOT NULL (Q1a): a booking exists and the customer paid against it.
+                raceRefundRecoveryService.recordAdditionalChargeRaceRefund(
+                        bookingId,
+                        req.razorpayPaymentId(),
+                        raceRzpRefund.get("id"),
+                        serverPriceDiff,
+                        additionalPaymentMethod);
+
+                // Outer @Transactional rolls back from this throw (no booking-side rows written).
+                // Recovery rows are already durably committed on a separate connection.
                 throw new ResponseStatusException(HttpStatus.CONFLICT,
-                        "Selected slot is no longer available; additional payment refund deferred to 6C-iii-2");
+                        "Selected slot is no longer available");
             }
 
             // 7. HAPPY PATH — one outer @Transactional covers all DB writes.

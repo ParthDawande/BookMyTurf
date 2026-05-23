@@ -144,6 +144,48 @@ public class RaceRefundRecoveryService {
      * IDs are passed (not entities) to avoid detached-entity issues across the tx boundary.
      * getReferenceById creates a proxy; only the ID is used for the INSERT FK column.
      */
+    /**
+     * 6C-iii-2 path: race detected after the customer already paid an additional charge for
+     * a PAYMENT reschedule. Razorpay refund succeeded; record the captured-then-refunded pair
+     * with booking_id NOT NULL (Q1a decision — a booking exists and the customer paid against
+     * it; differs from 5C-2b where booking_id IS NULL because no booking had been created).
+     *
+     * Transaction boundary: REQUIRES_NEW suspends the caller's outer booking transaction,
+     * opens a fresh connection, commits both rows, then resumes. The outer tx rolls back
+     * from the 409 throw; these rows survive on the separate committed connection.
+     *
+     * IDs are passed (not entities) to avoid detached-entity issues across tx boundary.
+     * getReferenceById creates a proxy; only the ID column is written on INSERT.
+     */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void recordAdditionalChargeRaceRefund(Long bookingId,
+                                                 String razorpayPaymentId,
+                                                 String rzpRefundId,
+                                                 BigDecimal amount,
+                                                 String paymentMethod) {
+        Booking bookingRef = bookingRepository.getReferenceById(bookingId);
+
+        // Payment row — booking_id NOT NULL (Q1a). Captures the fact that this payment
+        // was genuinely taken from the customer for this booking's reschedule attempt.
+        Payment payment = new Payment();
+        payment.setBooking(bookingRef);
+        payment.setGatewayTransactionId(razorpayPaymentId);
+        payment.setAmount(amount);
+        payment.setPaymentMethod(paymentMethod);
+        payment.setStatus(PaymentStatus.SUCCESS);
+        payment = paymentRepository.save(payment);
+
+        // Refund row — booking_id NOT NULL (Q1a). Records that the money was returned.
+        Refund refund = new Refund();
+        refund.setBooking(bookingRef);
+        refund.setPayment(payment);
+        refund.setAmount(amount);
+        refund.setRazorpayRefundId(rzpRefundId);
+        refund.setStatus(RefundStatus.SUCCESS);
+        refund.setProcessedAt(LocalDateTime.now());
+        refundRepository.save(refund);
+    }
+
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void recordCancelRefundFailure(Long bookingId, Long paymentId, BigDecimal amount) {
         Booking bookingRef = bookingRepository.getReferenceById(bookingId);
