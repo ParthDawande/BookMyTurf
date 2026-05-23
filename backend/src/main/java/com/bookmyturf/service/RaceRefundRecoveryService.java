@@ -200,4 +200,72 @@ public class RaceRefundRecoveryService {
         refund.setProcessedAt(LocalDateTime.now());
         refundRepository.save(refund);
     }
+
+    /**
+     * 6C-iii-3 Site A: reschedule REFUND-case Razorpay refund call failed.
+     * Commits a single FAILED refunds row via REQUIRES_NEW; the outer booking
+     * transaction is untouched (booking remains CONFIRMED, no slot/payout changes).
+     *
+     * Structurally identical to recordCancelRefundFailure; named separately to
+     * distinguish the source (reschedule-REFUND failure vs cancel failure) in logs.
+     *
+     * booking_id NOT NULL — a real booking exists; distinct from race-recovery rows (IS NULL).
+     * razorpayRefundId = null — call did not complete; no Razorpay refund ID issued.
+     */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void recordRescheduleRefundFailure(Long bookingId, Long paymentId, BigDecimal amount) {
+        Booking bookingRef = bookingRepository.getReferenceById(bookingId);
+        Payment paymentRef = paymentRepository.getReferenceById(paymentId);
+
+        Refund refund = new Refund();
+        refund.setBooking(bookingRef);
+        refund.setPayment(paymentRef);
+        refund.setAmount(amount);
+        refund.setRazorpayRefundId(null);
+        refund.setStatus(RefundStatus.FAILED);
+        refund.setProcessedAt(LocalDateTime.now());
+        refundRepository.save(refund);
+    }
+
+    /**
+     * 6C-iii-3 Site B: PAYMENT-race auto-refund call failed.
+     * The customer paid the additional charge (capture succeeded), a slot race was then
+     * detected, and the auto-refund call failed. The outer booking tx rolled back, so
+     * NO payment record for this capture exists yet. This method writes BOTH:
+     *   1. payments row (status=SUCCESS) — records the captured payment; booking_id NOT NULL (Q1a).
+     *   2. refunds  row (status=FAILED)  — records the failed refund; razorpayRefundId=null.
+     *
+     * Symmetric counterpart to recordAdditionalChargeRaceRefund (success path): both write a
+     * payments + refunds pair; the success path writes SUCCESS/SUCCESS, this one SUCCESS/FAILED.
+     *
+     * Why two rows vs one at Site A: Site A's booking already has a SUCCESS payment row in the DB.
+     * Site B's additional payment has no DB record (outer tx rolled back); both rows are needed
+     * to give the operator queue a complete picture of what was captured and what refund failed.
+     */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void recordAdditionalChargeRaceRefundFailure(Long bookingId,
+                                                        String razorpayPaymentId,
+                                                        BigDecimal amount,
+                                                        String paymentMethod) {
+        Booking bookingRef = bookingRepository.getReferenceById(bookingId);
+
+        // Payment row — booking_id NOT NULL (Q1a). status=SUCCESS: capture succeeded; only refund failed.
+        Payment payment = new Payment();
+        payment.setBooking(bookingRef);
+        payment.setGatewayTransactionId(razorpayPaymentId);
+        payment.setAmount(amount);
+        payment.setPaymentMethod(paymentMethod);
+        payment.setStatus(PaymentStatus.SUCCESS);
+        payment = paymentRepository.save(payment);
+
+        // Refund row — booking_id NOT NULL. razorpayRefundId=null: call did not complete.
+        Refund refund = new Refund();
+        refund.setBooking(bookingRef);
+        refund.setPayment(payment);
+        refund.setAmount(amount);
+        refund.setRazorpayRefundId(null);
+        refund.setStatus(RefundStatus.FAILED);
+        refund.setProcessedAt(LocalDateTime.now());
+        refundRepository.save(refund);
+    }
 }

@@ -1058,11 +1058,12 @@ public class BookingService {
                 rzpRefund = razorpayClient.payments.refund(
                         refundTarget.getGatewayTransactionId(), refundRequest);
             } catch (RazorpayException e) {
-                // 6C-iii: reschedule refund-failure FAILED-record writing pending
-                // (parallel to 6B-ii's cancel FAILED-record pattern).
-                // Booking is COMPLETELY UNCHANGED — no DB writes on this path.
+                // 6C-iii-3 Site A: write FAILED refunds row via REQUIRES_NEW before rethrowing.
+                // Booking is COMPLETELY UNCHANGED — no slot swap, no total/commission/payout changes.
                 log.error("Razorpay reschedule-refund failed for booking {} payment {}: {}",
                         bookingId, refundTarget.getGatewayTransactionId(), e.getMessage());
+                raceRefundRecoveryService.recordRescheduleRefundFailure(
+                        bookingId, refundTarget.getId(), refundAmount);
                 throw new ResponseStatusException(HttpStatus.BAD_GATEWAY,
                         "Payment refund could not be processed");
             }
@@ -1239,10 +1240,12 @@ public class BookingService {
                     raceRzpRefund = razorpayClient.payments.refund(
                             req.razorpayPaymentId(), raceRefundReq);
                 } catch (RazorpayException e) {
-                    // 6C-iii-2: race-after-payment refund failure rethrows 502 with no FAILED
-                    // record; 6C-iii-3 writes the FAILED recovery row using REQUIRES_NEW.
+                    // 6C-iii-3 Site B: write payments SUCCESS + refunds FAILED pair via REQUIRES_NEW.
+                    // The outer tx rolls back; REQUIRES_NEW commits these records on a separate connection.
                     log.error("Razorpay race-refund failed for PAYMENT reschedule booking {} payment {}: {}",
                             bookingId, req.razorpayPaymentId(), e.getMessage());
+                    raceRefundRecoveryService.recordAdditionalChargeRaceRefundFailure(
+                            bookingId, req.razorpayPaymentId(), serverPriceDiff, additionalPaymentMethod);
                     throw new ResponseStatusException(HttpStatus.BAD_GATEWAY,
                             "Payment refund could not be processed");
                 }
