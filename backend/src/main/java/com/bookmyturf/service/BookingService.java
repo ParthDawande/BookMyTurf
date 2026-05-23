@@ -1161,8 +1161,56 @@ public class BookingService {
                     null, null, refund.getId(), refund.getRazorpayRefundId());
 
         } else {
+            // PAYMENT branch — customer owes additional payment for the reschedule.
+
+            // 1. Three-field null check: all Razorpay payment fields are required.
+            if (req.razorpayOrderId() == null
+                    || req.razorpayPaymentId() == null
+                    || req.razorpaySignature() == null) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "Additional payment values are required for this reschedule");
+            }
+
+            // 2. HMAC-SHA256 signature verification — reject forged/replayed requests.
+            try {
+                JSONObject sigAttrs = new JSONObject();
+                sigAttrs.put("razorpay_order_id",  req.razorpayOrderId());
+                sigAttrs.put("razorpay_payment_id", req.razorpayPaymentId());
+                sigAttrs.put("razorpay_signature",  req.razorpaySignature());
+                boolean valid = Utils.verifyPaymentSignature(sigAttrs, razorpayKeySecret);
+                if (!valid) {
+                    throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Payment verification failed");
+                }
+            } catch (ResponseStatusException rse) {
+                throw rse;
+            } catch (RazorpayException e) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Payment verification failed");
+            }
+
+            // 3. Order notes mismatch — re-fetch Razorpay order and compare server-derived
+            //    pricing against what was written at initiate time.  A mismatch means the
+            //    sub-court rate changed between initiate and confirm; the customer must
+            //    re-initiate to get a fresh order at the current price.
+            try {
+                Order rzpOrder = razorpayClient.orders.fetch(req.razorpayOrderId());
+                JSONObject notes = (JSONObject) rzpOrder.get("notes");
+                if (notes == null
+                        || !bookingId.toString().equals(notes.optString("booking_id", null))
+                        || !serverNewTotal.toPlainString().equals(notes.optString("new_total", null))
+                        || !serverPriceDiff.toPlainString().equals(notes.optString("price_diff", null))) {
+                    throw new ResponseStatusException(HttpStatus.CONFLICT,
+                            "Reschedule pricing has changed — please re-initiate");
+                }
+            } catch (ResponseStatusException rse) {
+                throw rse;
+            } catch (RazorpayException e) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT,
+                        "Reschedule pricing has changed — please re-initiate");
+            }
+
+            // 4. Happy-path slot-swap + payment row — deferred to 6C-iii-1b.
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                    "Additional-payment reschedule requires the payment flow (6C-iii)");
+                    "PAYMENT happy path not yet implemented (6C-iii-1b)");
         }
     }
 
