@@ -1,0 +1,230 @@
+PHASE 7B of 3 — Complaints: customer create, admin assign, staff resolve.
+
+Standing rules apply. Stop and report. Do NOT start 7C. Reuse Phase 0
+error shape, Phase 2 security UNCHANGED. No 422. 404-not-403 for
+not-yours/not-existing. Real executed verification — raw DB SELECT
+output, no traced values.
+
+SCOPE: complaints lifecycle — customer raises, admin assigns to staff,
+staff (or admin) resolves. complaint_notes writes by staff/admin. One
+owner-directed-equivalent notification on assignment: COMPLAINT_ASSIGNED
+to the staff member. Endpoint paths per API_DOC.md.
+
+=== Locked design decisions (from Phase 7 framing) ===
+- Q1: complaint_notes are INTERNAL-ONLY by default. Customer's detail
+  view of their own complaint does NOT include the notes array. Staff
+  and admin views DO include notes.
+- Q2: admin can reassign a complaint at any time before resolution.
+  Reassign changes assigned_staff_id, emits a new COMPLAINT_ASSIGNED
+  notification to the NEW staff. No "unassigned" notification to the
+  old staff (§5 doesn't define such a type).
+- Q3: resolution REQUIRES a non-empty resolution_note. The resolve
+  endpoint accepts a resolution_note field; the service writes it as
+  a complaint_notes row, then flips status to RESOLVED in the same
+  transaction.
+- Q4: admins can override-resolve a complaint (even if not assigned).
+  Non-assigned staff attempting to resolve → 404 (no-leak).
+- Q5: complaint_notes XOR semantics — every row this sub-phase writes
+  must have complaint_id SET and query_id NULL. The XOR is enforced
+  application-side (the schema does not enforce it). 7C will write
+  the inverse.
+
+=== Status flow (DECISIONS §3-style semantics) ===
+OPEN → IN_PROGRESS (admin assigns)
+IN_PROGRESS → RESOLVED (assigned staff or admin)
+No other transitions. OPEN cannot become RESOLVED directly (must be
+assigned first). RESOLVED is terminal. Status guard violations → 400
+with clear messages (state-transition violations use 400 per
+DECISIONS §4 — not 422, not 409; 409 is for resource uniqueness).
+
+=== Endpoints (per API_DOC paths) ===
+
+CUSTOMER:
+- POST /api/customer/complaints — create. Body: subject, description,
+  related booking_id (optional). Validation: subject and description
+  non-empty. If booking_id given, must be owned by the customer.
+- GET /api/customer/complaints — list customer's own complaints,
+  paginated per API_DOC. Status visible. Notes NOT included.
+- GET /api/customer/complaints/{id} — detail. Customer can only see
+  their own (404 otherwise, no-leak). Notes NOT included.
+
+ADMIN:
+- GET /api/admin/complaints?status= — list, filterable by status,
+  default OPEN. Notes included.
+- GET /api/admin/complaints/{id} — detail with notes array.
+- POST /api/admin/complaints/{id}/assign — body: staff_id. Validates
+  that staff_id is a STAFF role user. Status OPEN → IN_PROGRESS,
+  assigned_staff_id set. Fires COMPLAINT_ASSIGNED notification to
+  the staff. If complaint already IN_PROGRESS, this is a reassign:
+  change assigned_staff_id, fire new COMPLAINT_ASSIGNED to the new
+  staff, no notification to old staff. Status stays IN_PROGRESS.
+  RESOLVED complaints cannot be (re)assigned → 400.
+- POST /api/admin/complaints/{id}/resolve — body: resolution_note
+  (non-empty required). Admin can resolve any complaint, regardless
+  of who is assigned. Same behavior as the staff resolve below for
+  the DB writes.
+
+STAFF:
+- GET /api/staff/complaints — list complaints assigned to this staff
+  (assigned_staff_id == caller). Notes included.
+- GET /api/staff/complaints/{id} — detail. Only visible if assigned
+  to this staff (404 otherwise, no-leak).
+- POST /api/staff/complaints/{id}/notes — body: note (non-empty
+  required). Writes a complaint_notes row: complaint_id = this
+  complaint, query_id NULL, author_id = caller, note_text, created_at.
+  Only the assigned staff (or an admin via the admin endpoint, see
+  below) can add notes. Returns the new note.
+- POST /api/staff/complaints/{id}/resolve — body: resolution_note
+  (non-empty required). Only the assigned staff. Writes a
+  complaint_notes row as the resolution note, then flips status to
+  RESOLVED. One transaction.
+
+ADMIN (mirror of staff for note operations, since admins have full
+access):
+- POST /api/admin/complaints/{id}/notes — same as staff notes
+  endpoint, but admin can write notes on any complaint regardless of
+  assignment. author_id = the admin caller. Optional in this sub-phase
+  if API_DOC doesn't specify; state whether you built this. If not
+  built, admins can still resolve (which writes a note), but can't
+  add intermediate notes without temporarily assigning to themselves.
+
+=== Authorization summary ===
+- Customer endpoints: customer role only. Wrong-customer → 404.
+- Admin endpoints: admin role only. Other roles → 403.
+- Staff endpoints: staff role only. Wrong-staff (not assigned) → 404.
+- Cross-role attempts (e.g., admin token on /api/staff/complaints):
+  reject 403. The role-scoping from Phase 2 already does this.
+
+=== Notification scope (§5) ===
+- ONE notification type from 7B: COMPLAINT_ASSIGNED to the
+  assigned staff. Reassign fires another COMPLAINT_ASSIGNED to the
+  new staff.
+- ZERO customer-facing notifications (§5 — "Resolved" notifications
+  to customer are out of v1 scope).
+- ZERO notifications to admin (admins poll the list).
+- The notification message should reference the complaint and its
+  subject. Format per API_DOC if specified.
+
+=== complaint_notes write rules ===
+- complaint_id = the complaint (NOT NULL).
+- query_id = NULL (XOR constraint — 7C writes the inverse).
+- author_id = caller (staff or admin).
+- note_text = the note content, non-empty.
+- created_at = NOW().
+- Notes are append-only in 7B: no edit endpoint, no delete endpoint.
+  (Resolution-note becomes immutable history once the complaint is
+  resolved.)
+
+=== Status-transition guards ===
+- Assign on a complaint that's already RESOLVED → 400.
+- Resolve on a complaint that's OPEN (never assigned) → 400, message
+  like "Complaint must be assigned before resolution."
+- Resolve on a complaint that's already RESOLVED → 400 (idempotent
+  rejection, not a 200 no-op — same pattern as Phase 4's already-
+  approved turf).
+- Notes on a RESOLVED complaint: REJECT 400 (resolution closes the
+  complaint; no further notes). State this explicitly.
+
+=== JPA mapping hazard (from 7A) ===
+If you set up complaint_notes with a bidirectional @OneToMany from
+Complaint with orphanRemoval=true, you risk the same silent-rollback
+bug 7A surfaced when deleting a child via the child repo. 7B does
+not have a delete-note endpoint, so this may not bite — but state
+explicitly the mapping you used and confirm there's no path that
+would trigger orphanRemoval silent rollback. If in doubt, use the
+@Modifying JPQL pattern from 7A.
+
+=== Do NOT in 7B ===
+- No queries logic (7C — same complaint_notes table but with
+  query_id set, complaint_id NULL).
+- No customer-facing notifications.
+- No note edit or delete endpoints.
+- No "unassigned" notification to staff.
+- Do not modify Phase 5/6 booking lifecycle code.
+- Do not modify Phase 7A review code.
+
+=== VERIFICATION — REAL executed, raw DB output ===
+
+1. Files modified; final endpoint list. State the complaint_notes
+   JPA mapping approach and confirm no orphanRemoval trap exists.
+   State whether you built /api/admin/complaints/{id}/notes (the
+   admin-side note write endpoint).
+
+2. CUSTOMER CREATE happy path:
+   a. Customer X creates a complaint. Body: subject + description
+      (+ optionally booking_id). Show raw response.
+   b. Raw SELECT: complaints row with status=OPEN,
+      assigned_staff_id NULL, customer_id matching. Show.
+
+3. ADMIN ASSIGN:
+   a. Admin lists OPEN complaints — show the new one in the
+      response.
+   b. Admin assigns to staff S. Show raw response.
+   c. Raw SELECT: complaints row now has status=IN_PROGRESS,
+      assigned_staff_id=S.id. Show.
+   d. Raw SELECT notifications: a new row with type=COMPLAINT_ASSIGNED,
+      user_id=S.id (not customer, not admin). Show.
+
+4. ADMIN REASSIGN:
+   a. Admin reassigns the same complaint to a different staff S2.
+      Show raw response.
+   b. Raw SELECT: complaints.assigned_staff_id=S2.id, status still
+      IN_PROGRESS.
+   c. Raw SELECT notifications: a SECOND COMPLAINT_ASSIGNED row,
+      this one to S2. The first (to S) remains as historical.
+   d. No notification to S (the old assignee). State explicitly:
+      no UNASSIGNED-type rows in notifications table.
+
+5. STAFF NOTE WRITES:
+   a. Staff S2 (now assigned) adds a note. Show raw response.
+   b. Raw SELECT complaint_notes: row with complaint_id=this
+      complaint, query_id NULL (the XOR enforcement), author_id=S2.id,
+      note_text and created_at present.
+   c. Staff S (NOT assigned to this complaint) tries to add a note
+      → 404 (no-leak). Identical row counts.
+
+6. ADMIN OVERRIDE-RESOLVE:
+   a. Admin resolves the complaint with a resolution_note. Show raw
+      response.
+   b. Raw SELECT complaints: status=RESOLVED.
+   c. Raw SELECT complaint_notes: a new row (the resolution note),
+      author_id=admin.id, complaint_id set, query_id NULL.
+   d. No new notification (§5 — no customer-facing resolved notif).
+
+7. STAFF RESOLVE happy path (separate complaint):
+   a. Create + assign a fresh complaint to staff S. Staff S resolves
+      with resolution_note.
+   b. Raw SELECT complaints: status=RESOLVED.
+   c. Raw SELECT complaint_notes: resolution note with author_id=S.id.
+
+8. STATUS-TRANSITION GUARDS — execute each:
+   a. Assign on a RESOLVED complaint → 400.
+   b. Resolve on an OPEN complaint (never assigned) → 400 with
+      message about needing assignment first.
+   c. Resolve on an already-RESOLVED complaint → 400 (not 200, not
+      idempotent silent success).
+   d. Add a note on a RESOLVED complaint → 400.
+   For each: identical before/after row counts on complaints,
+   complaint_notes, notifications.
+
+9. AUTHORIZATION GUARDS:
+   a. Customer A tries to GET customer B's complaint → 404, no-leak.
+   b. Staff not assigned tries to GET the complaint detail → 404.
+   c. Customer tries to access /api/admin/complaints → 403.
+   d. Customer tries to access /api/staff/complaints → 403.
+   e. Required-field validation: empty subject, empty description,
+      empty resolution_note → 400 with clear messages.
+
+10. XOR INVARIANT (preview for 7C):
+    State the complaint_notes rows from items 5–7. All have
+    complaint_id SET and query_id NULL. 7C will write the inverse.
+    Show ONE raw SELECT row to confirm: id, complaint_id (set),
+    query_id (NULL), author_id, note_text, created_at.
+
+11. §5: ALL notifications across this sub-phase. State:
+    - COMPLAINT_ASSIGNED rows: how many created, all targeting
+      staff user_ids (not customer, not admin).
+    - Zero customer-facing rows.
+    - Zero notifications to admins.
+
+Do not begin 7C.

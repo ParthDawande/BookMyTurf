@@ -27,8 +27,8 @@ public class ComplaintNote {
     private CustomerQuery query;
 
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
-    @JoinColumn(name = "staff_id", nullable = false)
-    private User staff;
+    @JoinColumn(name = "author_id", nullable = false)
+    private User author;
 
     @Column(name = "note_text", nullable = false, columnDefinition = "TEXT")
     private String noteText;
