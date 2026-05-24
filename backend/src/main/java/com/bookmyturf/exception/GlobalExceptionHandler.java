@@ -11,6 +11,7 @@ import org.springframework.web.server.ResponseStatusException;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import com.bookmyturf.exception.ReviewAlreadyExistsException;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
@@ -37,6 +38,14 @@ public class GlobalExceptionHandler {
         body.put("error", ex.getMessage());
         body.put("conflicting_bookings", ex.getConflictingBookingIds());
         return ResponseEntity.badRequest().body(body);
+    }
+
+    @ExceptionHandler(ReviewAlreadyExistsException.class)
+    public ResponseEntity<Map<String, Object>> handleReviewAlreadyExists(ReviewAlreadyExistsException ex) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("error", ex.getMessage());
+        body.put("existing_review_id", ex.getExistingReviewId());
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(body);
     }
 
     @ExceptionHandler(IllegalArgumentException.class)
