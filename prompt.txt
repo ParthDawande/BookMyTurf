@@ -1,244 +1,200 @@
-PHASE 7C of 3 — Queries: customer create, staff atomic claim, staff
-resolve. Phase 7 ends here.
+PHASE 8A of 3 — Payouts: scheduled release (config-disabled), admin
+trigger endpoint, owner-facing payouts list.
 
-Standing rules apply. Stop and report. After acceptance, Phase 7 is
-complete. Reuse Phase 0 error shape, Phase 2 security UNCHANGED. No
-422. 404-not-403 for not-yours/not-existing. Real executed
-verification — raw DB SELECT output, ATOMIC CLAIM proven by a real
-forced-race test, no traced values.
+Standing rules apply. Stop and report. Do NOT start 8B. Reuse Phase 0
+error shape, Phase 2 security UNCHANGED. No 422. 404-not-403 for
+not-yours/not-existing. Real executed verification — raw DB SELECT
+output, raw before/after counts on the release job, no traced values.
 
-SCOPE: queries lifecycle — customer raises, staff claims atomically
-from a pool, staff resolves (with required resolution note). Optional
-notes during work. Admin can list/view all and override-resolve.
-Endpoint paths per API_DOC.md.
+SCOPE: payout state-transition from PENDING → PAID after the 24h hold
+window AND owner-facing list endpoints. The simulated release runs
+either via a Spring @Scheduled job (DISABLED by default in v1) OR via
+an admin-trigger endpoint. Same service method, two entry points.
 
-=== Locked design decisions (from Phase 7 framing and §8) ===
-- DECISIONS §8: queries has NO picked_up_at column. The claim
-  timestamp is derived server-side at the moment of claim, returned
-  in the response only — NOT persisted to the DB. Do not add the
-  column.
-- Atomic claim: single UPDATE queries SET status='IN_PROGRESS',
-  staff_id=:caller WHERE id=:id AND status='OPEN' with a row-count
-  check. Row count 1 = won. Row count 0 = already claimed (or doesn't
-  exist) → 409 "This query has already been claimed" (resource-
-  uniqueness conflict per the 7A/7B-established 400-vs-409 rule:
-  409 because the OPEN status is the "resource" that's already been
-  taken).
-- No SELECT FOR UPDATE. The atomic UPDATE-WHERE handles the race
-  internally without explicit locking.
-- query_notes XOR semantics: every row written in 7C has query_id
-  SET and complaint_id NULL. The XOR is enforced application-side
-  (same shared table as complaint_notes from 7B). Verify with raw
-  SELECT in your report.
-- Resolution requires a non-empty resolution_note (same as 7B):
-  the resolve endpoint writes a query_notes row, then flips status
-  to RESOLVED in the same transaction.
-- Admin override-resolve: admins can resolve any query regardless
-  of who claimed it. Same shape as 7B's admin override.
+=== Locked design (from Phase 8 framing) ===
+- Q1 = option (c): scheduler + admin trigger, scheduler disabled in v1.
+- New config property: app.payout.scheduler.enabled (default false in
+  tracked application.properties — explicitly literal false, not
+  reliant on @Value default).
+- New config property: app.payout.scheduler.fixed-rate-ms (the period
+  between runs when enabled; default 60000 = 1 minute, irrelevant
+  in v1 because scheduler is off, but settable for v2).
+- Existing config app.payout.hold-hours (=24) is reused as-is.
+- Service method: PayoutReleaseService.releaseEligiblePayouts() —
+  the unit of work, callable from both the @Scheduled wrapper and
+  the admin endpoint.
+- SELECT FOR UPDATE on each candidate payout row when flipping (to
+  serialize against a concurrent cancel that's also touching the
+  same row). Same pattern as 5B's sub-court lock.
 
-=== Status flow ===
-OPEN → IN_PROGRESS (staff claim, atomic UPDATE)
-IN_PROGRESS → RESOLVED (claiming staff or admin resolves)
-No other transitions. State violations → 400 (status-transition is
-state, not uniqueness).
-- Claim on IN_PROGRESS or RESOLVED → 409 (uniqueness — the claim
-  slot is taken or gone).
-- Resolve on OPEN (unclaimed) → 400, "Query must be claimed before
-  resolution."
-- Resolve on RESOLVED → 400 "Query is already resolved."
-- Notes on RESOLVED → 400 "Cannot add notes to a resolved query."
+=== The release logic ===
+1. Find all payouts WHERE status = 'PENDING'
+   AND scheduled_at <= NOW().
+2. For each, in its own @Transactional method:
+   - SELECT ... FOR UPDATE on the payouts row.
+   - Re-read its status under the lock — if not PENDING anymore
+     (race against cancel), skip.
+   - Re-read scheduled_at under the lock — if scheduled_at > NOW()
+     (defensive), skip.
+   - Set status = 'PAID', set paid_at = NOW().
+   - Emit OWNER notification: PAYOUT_RELEASED (state the exact type
+     used and message format).
+   - Commit.
+3. Return count of payouts processed.
 
-=== Endpoints (per API_DOC paths) ===
+=== Timezone handling (carried-forward Phase 6B/6C pattern) ===
+- scheduled_at is stored as Instant (UTC).
+- "NOW" for comparison is Instant.now() (UTC).
+- DO NOT compare LocalDateTime to LocalDateTime relying on the JVM
+  default zone.
+- Quote the exact comparison line in your report.
 
-CUSTOMER:
-- POST /api/customer/queries — create. Body: subject, description.
-  Validation: non-empty.
-- GET /api/customer/queries — list own queries, paginated. Status
-  visible. Notes NOT included (Q1 from 7B carried — internal-only).
-- GET /api/customer/queries/{id} — detail. Own only (404 otherwise).
-  Notes NOT included.
+=== Schema column: paid_at ===
+- The payouts table has a paid_at column per the original schema
+  (or, if not, it needs adding — state which). On release, set
+  paid_at = Instant.now() (UTC). When status = CANCELLED (from 6B
+  cancel logic), paid_at stays NULL.
+- If paid_at doesn't exist in the schema, ADD it as a deviation
+  (DATETIME(6) nullable). Same kind of deviation as the
+  Phase 7 resolved_at columns — persistent state-transition
+  timestamp for dashboard use.
 
-STAFF:
-- GET /api/staff/queries?status=OPEN — list unclaimed queries (the
-  pool). Default filter: status=OPEN. Notes NOT relevant here.
-- POST /api/staff/queries/{id}/claim — atomic claim. NO body.
-  Response includes derived claimed_at (server timestamp at claim,
-  not persisted).
-- GET /api/staff/queries?status=IN_PROGRESS&mine=true — list
-  queries claimed by this staff. Notes included.
-- GET /api/staff/queries/{id} — detail. Only if claimed by this
-  staff (404 otherwise, no-leak). Notes included.
-- POST /api/staff/queries/{id}/notes — add a note. Body: note
-  (non-empty). Only the claiming staff can add notes. Writes a
-  query_notes row: query_id SET, complaint_id NULL, author_id=
-  caller, note_text.
-- POST /api/staff/queries/{id}/resolve — body: resolution_note
-  (non-empty). Only the claiming staff. Writes a query_notes row
-  as resolution note, then flips status to RESOLVED in same tx.
+=== Admin trigger endpoint ===
+- POST /api/admin/payouts/run-release (per API_DOC; if not specified,
+  use this path).
+- No body. Returns the count of payouts released and the list of
+  released payout IDs.
+- Admin role only. Other roles → 403.
+- Calls the same PayoutReleaseService.releaseEligiblePayouts().
 
-ADMIN:
-- GET /api/admin/queries?status= — list all, filterable. Notes
-  included.
-- GET /api/admin/queries/{id} — detail with notes.
-- POST /api/admin/queries/{id}/resolve — body: resolution_note.
-  Admin can resolve any query regardless of claim. Same DB writes
-  as staff resolve (resolution-note row + status flip), but
-  author_id = the admin.
-- POST /api/admin/queries/{id}/notes — optional (per 7B's
-  symmetric admin-notes endpoint). State whether you built it. If
-  built, admin can add notes on any query; author_id = admin.
+=== Owner-facing payouts list ===
+- GET /api/owner/payouts — list payouts for the owner's turfs.
+  Paginated per API_DOC.
+- Filterable by status (PENDING, PAID, CANCELLED — or none for all).
+- Filterable by date range (from_date, to_date as IST date strings).
+  Date range filter applies to scheduled_at: convert IST date to
+  Instant bounds (atStartOfDay / endOfDay 23:59:59.999999999 in
+  Asia/Kolkata) and use those as the SQL bounds. Same tz pattern as
+  6B/6C-iii.
+- Response includes: payout id, booking id (with maybe basic booking
+  info like turf name + booking_date), amount, status, scheduled_at,
+  paid_at (if PAID), created_at.
 
-=== Authorization summary ===
-- Customer endpoints: customer role only. Wrong-customer → 404.
-- Staff endpoints: staff role only. Wrong-staff (not claimed) → 404.
-- Admin endpoints: admin role only. Cross-role attempts → 403.
-- Phase 2 role-scoping from /api/staff/** that 7B added already
-  handles the security config.
+=== The carried-forward filter on payouts ===
+- payouts always have booking_id NOT NULL by construction (every
+  payout is for a specific booking). There's no "race-recovery"
+  payout shape. The booking_id IS NULL filter from earlier phases
+  applies to payments/refunds, not payouts. State this explicitly.
+- A payout for a booking that has REFUNDED or has its booking_id
+  in a CANCELLED state may itself be CANCELLED (from 6B cancel
+  logic). Those should show in the owner's list with status =
+  CANCELLED.
 
-=== Notification scope (§5) ===
-- ZERO notification types fired from 7C. Queries are pull-model.
-- ZERO customer-facing, ZERO staff-facing, ZERO admin-facing.
-- Explicitly state this in the verification (grep QueryService
-  for notificationRepository or equivalent — should find zero
-  calls).
+=== Owner scoping (no cross-owner leak) ===
+- An owner viewing /api/owner/payouts sees ONLY their own payouts
+  (via the booking → sub-court → turf → owner chain).
+- An owner viewing /api/owner/payouts/{id} where the payout belongs
+  to another owner → 404 (no-leak, same as Phase 3 turf access).
 
-=== query_notes write rules ===
-- query_id = the query (NOT NULL).
-- complaint_id = NULL (XOR — 7B writes the inverse).
-- author_id = caller (staff or admin).
-- note_text non-empty.
-- created_at = NOW().
-- Append-only: no edit, no delete endpoints in 7C.
+=== Do NOT in 8A ===
+- No dashboard aggregations (8B).
+- No notifications list endpoints (8C).
+- Do NOT enable the scheduler in tracked application.properties.
+  Default app.payout.scheduler.enabled=false. The scheduler code
+  must check this flag before doing anything.
+- Do not modify any Phase 5/6/7 code.
+- No customer-facing notifications.
 
-=== JPA mapping caution (from 7A/7B) ===
-Apply the same preemptive caution from 7B's complaint mapping: do
-NOT set up Query with a bidirectional @OneToMany collection of
-notes with orphanRemoval=true. Use a plain @ManyToOne on QueryNote
-pointing to Query, with no inverse collection on Query. There is
-no delete-note endpoint in 7C so the silent-rollback bug from 7A
-cannot bite, but the mapping should be safe by design, not safe
-because no caller exercises it.
+=== VERIFICATION — REAL executed, raw output ===
 
-=== Do NOT in 7C ===
-- No picked_up_at column (DECISIONS §8).
-- No SELECT FOR UPDATE on the claim (atomic UPDATE-WHERE is the
-  pattern).
-- No customer-facing or any notification of any type.
-- No note edit or delete endpoints.
-- Do not modify Phase 5/6 booking-lifecycle code or 7A/7B
-  complaint/review code.
+1. Files modified; final list of endpoints. State whether you added
+   paid_at as a schema deviation. State the JPA mapping for payouts
+   (should be unchanged). Quote the exact Instant.now() comparison
+   line.
 
-=== VERIFICATION — REAL executed, raw DB output ===
+2. SCHEDULER WIRING — verify it's correctly disabled by default:
+   a. Tracked application.properties has app.payout.scheduler.enabled=
+      false literally present. Show the grep.
+   b. Start the server with default config. Confirm in startup logs
+      that the scheduler does NOT register. Quote the log line that
+      either says "scheduler disabled" or shows the absence of any
+      "PayoutRelease" scheduler registration.
+   c. Briefly enable it (set true in application-local.properties,
+      restart). Confirm it registers and fires at least once within
+      the configured fixed-rate window. Show the log line confirming
+      it ran. State the count of payouts it processed on that run.
+   d. Disable it again (false in application-local). Restart.
+      Confirm it's off.
 
-1. Files modified; final endpoint list. State the QueryNote
-   JPA mapping approach (confirm no orphanRemoval trap exists).
-   State whether you built /api/admin/queries/{id}/notes.
+3. ADMIN TRIGGER endpoint:
+   a. Admin calls POST /api/admin/payouts/run-release. Show raw
+      HTTP response.
+   b. State the count of payouts released (likely 0 in the initial
+      run because all existing payouts from earlier phases have
+      scheduled_at far in the future or were CANCELLED).
+   c. Stage an eligible payout: take a CONFIRMED booking from
+      earlier phases (or stage a new one), UPDATE its payouts row
+      to set status=PENDING and scheduled_at = NOW() - INTERVAL 1
+      HOUR (i.e., overdue). State the payout id and the booking id.
+   d. Admin re-triggers. Show response. The count should now be 1
+      (or more if other staged eligible).
+   e. Raw SELECT post-trigger:
+      - payouts row: status=PAID, paid_at = the timestamp around
+        when the trigger ran (within seconds of NOW). Show the row.
+      - notifications: a new PAYOUT_RELEASED row to the owner
+        (user_id of the owner of the turf). Show.
+   f. Customer-side: confirm zero customer-facing notifications
+      from the release (§5 — payout is owner-internal).
 
-2. CUSTOMER CREATE happy path:
-   a. Customer X creates a query. Show raw response.
-   b. Raw SELECT queries: row with status=OPEN, staff_id NULL.
+4. OWNER LIST endpoint:
+   a. Owner GET /api/owner/payouts. Show raw response. Verify:
+      - the owner's own payouts appear (the one just released as
+        PAID, any others as PENDING, any CANCELLED from earlier
+        6B cancel tests).
+      - sorting/pagination per API_DOC (default order).
+   b. Owner GET /api/owner/payouts?status=PENDING. Show. Only
+      PENDING rows.
+   c. Owner GET /api/owner/payouts?status=PAID. Show. Only PAID
+      rows.
+   d. Owner GET /api/owner/payouts?from_date=2026-05-01&to_date=
+      2026-05-31 (or whatever range covers your test data). Show.
+      Verify only payouts whose scheduled_at falls in that IST
+      date range are returned. The IST → Instant conversion must
+      be correct (a payout scheduled for IST 2026-05-31 23:30
+      should be IN the range, not excluded).
 
-3. STAFF POOL VIEW:
-   a. Staff S1 lists GET /api/staff/queries?status=OPEN. The new
-      query appears in the response.
-   b. State the list shape and the visible fields.
+5. OWNER 404-no-leak: owner A tries to GET /api/owner/payouts/{id}
+   where {id} belongs to owner B → 404. Identical row counts.
 
-4. ATOMIC CLAIM — happy path:
-   a. Staff S1 calls POST /api/staff/queries/{id}/claim.
-      Show raw response: query id, status=IN_PROGRESS, staff_id=S1
-      (NOT persisted in any picked_up_at column — derived
-      claimed_at present in response).
-   b. Raw SELECT queries: row now has status=IN_PROGRESS,
-      staff_id=S1.id. NO picked_up_at column exists (verify via
-      DESCRIBE queries; show the schema).
+6. CONCURRENCY (the race-against-cancel) — execute if you can stage
+   it cleanly; otherwise document the code path:
+   a. Take a CONFIRMED booking with a PENDING payout whose
+      scheduled_at is set to NOW() - 1 hour (eligible).
+   b. Force a race: trigger the release endpoint AND a customer-
+      cancel endpoint in near-simultaneous calls (two terminals,
+      or a script).
+   c. EXPECTED outcomes (state which observed):
+      - If release wins: payout flips to PAID, then cancel sees
+        status=PAID, refunds the customer anyway (per 6B's existing
+        logic), payouts.status stays PAID (or gets set to CANCELLED
+        if the cancel logic overrides — state which your 6B code
+        does), booking REFUNDED. The customer's money is back; the
+        owner's payout is in an awkward state.
+      - If cancel wins: payouts.status=CANCELLED, then release sees
+        status=CANCELLED, skips.
+      Either is acceptable per the 6B design. Document which
+      occurred.
+   d. If staging is impractical, paste the relevant code paths
+      from PayoutReleaseService and BookingService.cancel showing
+      the SELECT FOR UPDATE on payouts in both — proving they
+      serialize against each other rather than racing.
 
-5. ATOMIC CLAIM — forced race (the substantive test):
-   a. Create a fresh query. Confirm status=OPEN via raw SELECT.
-   b. Force a race: open TWO connections (e.g., two curl calls
-      issued near-simultaneously, OR more deterministically, by
-      using a brief script or a debugger pause). Both call
-      /claim on the same query id.
-   c. EXPECTED: one returns 200/201 with success body. The other
-      returns 409 with "This query has already been claimed."
-      Show BOTH raw responses with their timestamps.
-   d. Raw SELECT queries: row has status=IN_PROGRESS, staff_id
-      set to ONE staff (the winner). Show the row.
-   e. State explicitly: "The atomic UPDATE ... WHERE status='OPEN'
-      handled this race without SELECT FOR UPDATE. The losing
-      transaction's UPDATE returned row count 0 because the WHERE
-      clause failed to match after the winning transaction
-      changed the row."
-   f. Notification scope: zero notifications created by either
-      claim (winning or losing). State the row count of
-      notifications before/after — IDENTICAL.
+7. §5: zero customer-facing notifications across all tests. Only
+   PAYOUT_RELEASED rows to owners are created. State the count.
 
-6. STAFF NOTE WRITES (XOR closing — the other half of the
-   invariant):
-   a. Claiming staff adds a note. Show raw response.
-   b. Raw SELECT query_notes: row with query_id SET (matching),
-      complaint_id NULL, author_id=staff.id, note_text and
-      created_at present. THIS IS THE XOR INVERSE OF 7B's
-      complaint_notes rows.
-   c. Non-claiming staff tries to add a note on this query → 404,
-      no-leak. Identical row counts.
+8. SCHEDULER HYGIENE: confirm tracked application.properties has
+   the flag literally false at the end; application-local has it
+   false. Repo Select-String for "payout.scheduler.enabled" finds
+   only those two literal-false lines.
 
-7. STAFF RESOLVE happy path:
-   a. Claiming staff resolves with resolution_note. Show response.
-   b. Raw SELECT queries: status=RESOLVED.
-   c. Raw SELECT query_notes: a new row with the resolution note,
-      author_id = the staff who claimed.
-   d. Zero notifications created.
-
-8. ADMIN OVERRIDE-RESOLVE:
-   a. Admin resolves a different (assigned-to-different-staff)
-      query with resolution_note. Show response.
-   b. Raw SELECT queries: status=RESOLVED.
-   c. Raw SELECT query_notes: resolution note with author_id =
-      the admin.
-
-9. STATUS-TRANSITION GUARDS — execute each:
-   a. Claim on IN_PROGRESS → 409 (uniqueness — the claim slot is
-      taken).
-   b. Claim on RESOLVED → 409.
-   c. Resolve on OPEN (unclaimed) → 400 with the "must be claimed
-      first" message.
-   d. Resolve on RESOLVED → 400.
-   e. Add note on RESOLVED → 400.
-   For each: identical row counts on queries, query_notes,
-   notifications.
-
-10. AUTHORIZATION GUARDS:
-    a. Customer A GET customer B's query → 404 no-leak.
-    b. Non-claiming staff GET /queries/{id} → 404 (the query is
-       claimed by someone else; staff B should see 404, not 403).
-    c. Customer → admin endpoint → 403.
-    d. Customer → staff endpoint → 403.
-    e. Empty subject/description/resolution_note → 400 validation
-       with clear messages.
-
-11. XOR INVARIANT — STRUCTURAL VERIFICATION:
-    Execute these queries and paste raw output:
-    - SELECT COUNT(*) FROM complaint_notes WHERE complaint_id IS
-      NULL OR query_id IS NOT NULL;
-      Expected: 0 (all 7B-written rows have complaint_id SET,
-      query_id NULL).
-    - SELECT COUNT(*) FROM query_notes WHERE query_id IS NULL OR
-      complaint_id IS NOT NULL;
-      Expected: 0 (all 7C-written rows have query_id SET,
-      complaint_id NULL).
-    - SELECT one representative row from each side (one
-      complaint_notes row from 7B, one query_notes row from 7C),
-      showing the IS NULL / IS NOT NULL pattern is opposite.
-    State explicitly: the XOR is application-enforced (the schema
-    does not have a CHECK constraint or trigger). v2 polish could
-    add a DB-level CHECK if desired (no §8 violation — adding
-    constraints is not adding columns or tables).
-
-12. §5 / NOTIFICATION ABSENCE:
-    a. Grep QueryService for notificationRepository calls or
-       equivalent — should be zero. State the grep output.
-    b. Across all of items 2–10, the notifications table row
-       count is unchanged from before any 7C activity. Show the
-       before/after counts.
-
-Phase 7 is complete after this. Do not begin Phase 8.
+Do not begin 8B.
