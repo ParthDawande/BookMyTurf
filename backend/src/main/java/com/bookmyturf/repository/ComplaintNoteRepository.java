@@ -11,4 +11,7 @@ public interface ComplaintNoteRepository extends JpaRepository<ComplaintNote, Lo
 
     @Query("SELECT cn FROM ComplaintNote cn WHERE cn.complaint.id = :complaintId ORDER BY cn.createdAt ASC")
     List<ComplaintNote> findByComplaintId(@Param("complaintId") Long complaintId);
+
+    @Query("SELECT cn FROM ComplaintNote cn WHERE cn.query.id = :queryId ORDER BY cn.createdAt ASC")
+    List<ComplaintNote> findByQueryId(@Param("queryId") Long queryId);
 }

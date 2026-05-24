@@ -1,230 +1,244 @@
-PHASE 7B of 3 — Complaints: customer create, admin assign, staff resolve.
+PHASE 7C of 3 — Queries: customer create, staff atomic claim, staff
+resolve. Phase 7 ends here.
 
-Standing rules apply. Stop and report. Do NOT start 7C. Reuse Phase 0
-error shape, Phase 2 security UNCHANGED. No 422. 404-not-403 for
-not-yours/not-existing. Real executed verification — raw DB SELECT
-output, no traced values.
+Standing rules apply. Stop and report. After acceptance, Phase 7 is
+complete. Reuse Phase 0 error shape, Phase 2 security UNCHANGED. No
+422. 404-not-403 for not-yours/not-existing. Real executed
+verification — raw DB SELECT output, ATOMIC CLAIM proven by a real
+forced-race test, no traced values.
 
-SCOPE: complaints lifecycle — customer raises, admin assigns to staff,
-staff (or admin) resolves. complaint_notes writes by staff/admin. One
-owner-directed-equivalent notification on assignment: COMPLAINT_ASSIGNED
-to the staff member. Endpoint paths per API_DOC.md.
+SCOPE: queries lifecycle — customer raises, staff claims atomically
+from a pool, staff resolves (with required resolution note). Optional
+notes during work. Admin can list/view all and override-resolve.
+Endpoint paths per API_DOC.md.
 
-=== Locked design decisions (from Phase 7 framing) ===
-- Q1: complaint_notes are INTERNAL-ONLY by default. Customer's detail
-  view of their own complaint does NOT include the notes array. Staff
-  and admin views DO include notes.
-- Q2: admin can reassign a complaint at any time before resolution.
-  Reassign changes assigned_staff_id, emits a new COMPLAINT_ASSIGNED
-  notification to the NEW staff. No "unassigned" notification to the
-  old staff (§5 doesn't define such a type).
-- Q3: resolution REQUIRES a non-empty resolution_note. The resolve
-  endpoint accepts a resolution_note field; the service writes it as
-  a complaint_notes row, then flips status to RESOLVED in the same
-  transaction.
-- Q4: admins can override-resolve a complaint (even if not assigned).
-  Non-assigned staff attempting to resolve → 404 (no-leak).
-- Q5: complaint_notes XOR semantics — every row this sub-phase writes
-  must have complaint_id SET and query_id NULL. The XOR is enforced
-  application-side (the schema does not enforce it). 7C will write
-  the inverse.
+=== Locked design decisions (from Phase 7 framing and §8) ===
+- DECISIONS §8: queries has NO picked_up_at column. The claim
+  timestamp is derived server-side at the moment of claim, returned
+  in the response only — NOT persisted to the DB. Do not add the
+  column.
+- Atomic claim: single UPDATE queries SET status='IN_PROGRESS',
+  staff_id=:caller WHERE id=:id AND status='OPEN' with a row-count
+  check. Row count 1 = won. Row count 0 = already claimed (or doesn't
+  exist) → 409 "This query has already been claimed" (resource-
+  uniqueness conflict per the 7A/7B-established 400-vs-409 rule:
+  409 because the OPEN status is the "resource" that's already been
+  taken).
+- No SELECT FOR UPDATE. The atomic UPDATE-WHERE handles the race
+  internally without explicit locking.
+- query_notes XOR semantics: every row written in 7C has query_id
+  SET and complaint_id NULL. The XOR is enforced application-side
+  (same shared table as complaint_notes from 7B). Verify with raw
+  SELECT in your report.
+- Resolution requires a non-empty resolution_note (same as 7B):
+  the resolve endpoint writes a query_notes row, then flips status
+  to RESOLVED in the same transaction.
+- Admin override-resolve: admins can resolve any query regardless
+  of who claimed it. Same shape as 7B's admin override.
 
-=== Status flow (DECISIONS §3-style semantics) ===
-OPEN → IN_PROGRESS (admin assigns)
-IN_PROGRESS → RESOLVED (assigned staff or admin)
-No other transitions. OPEN cannot become RESOLVED directly (must be
-assigned first). RESOLVED is terminal. Status guard violations → 400
-with clear messages (state-transition violations use 400 per
-DECISIONS §4 — not 422, not 409; 409 is for resource uniqueness).
+=== Status flow ===
+OPEN → IN_PROGRESS (staff claim, atomic UPDATE)
+IN_PROGRESS → RESOLVED (claiming staff or admin resolves)
+No other transitions. State violations → 400 (status-transition is
+state, not uniqueness).
+- Claim on IN_PROGRESS or RESOLVED → 409 (uniqueness — the claim
+  slot is taken or gone).
+- Resolve on OPEN (unclaimed) → 400, "Query must be claimed before
+  resolution."
+- Resolve on RESOLVED → 400 "Query is already resolved."
+- Notes on RESOLVED → 400 "Cannot add notes to a resolved query."
 
 === Endpoints (per API_DOC paths) ===
 
 CUSTOMER:
-- POST /api/customer/complaints — create. Body: subject, description,
-  related booking_id (optional). Validation: subject and description
-  non-empty. If booking_id given, must be owned by the customer.
-- GET /api/customer/complaints — list customer's own complaints,
-  paginated per API_DOC. Status visible. Notes NOT included.
-- GET /api/customer/complaints/{id} — detail. Customer can only see
-  their own (404 otherwise, no-leak). Notes NOT included.
-
-ADMIN:
-- GET /api/admin/complaints?status= — list, filterable by status,
-  default OPEN. Notes included.
-- GET /api/admin/complaints/{id} — detail with notes array.
-- POST /api/admin/complaints/{id}/assign — body: staff_id. Validates
-  that staff_id is a STAFF role user. Status OPEN → IN_PROGRESS,
-  assigned_staff_id set. Fires COMPLAINT_ASSIGNED notification to
-  the staff. If complaint already IN_PROGRESS, this is a reassign:
-  change assigned_staff_id, fire new COMPLAINT_ASSIGNED to the new
-  staff, no notification to old staff. Status stays IN_PROGRESS.
-  RESOLVED complaints cannot be (re)assigned → 400.
-- POST /api/admin/complaints/{id}/resolve — body: resolution_note
-  (non-empty required). Admin can resolve any complaint, regardless
-  of who is assigned. Same behavior as the staff resolve below for
-  the DB writes.
+- POST /api/customer/queries — create. Body: subject, description.
+  Validation: non-empty.
+- GET /api/customer/queries — list own queries, paginated. Status
+  visible. Notes NOT included (Q1 from 7B carried — internal-only).
+- GET /api/customer/queries/{id} — detail. Own only (404 otherwise).
+  Notes NOT included.
 
 STAFF:
-- GET /api/staff/complaints — list complaints assigned to this staff
-  (assigned_staff_id == caller). Notes included.
-- GET /api/staff/complaints/{id} — detail. Only visible if assigned
-  to this staff (404 otherwise, no-leak).
-- POST /api/staff/complaints/{id}/notes — body: note (non-empty
-  required). Writes a complaint_notes row: complaint_id = this
-  complaint, query_id NULL, author_id = caller, note_text, created_at.
-  Only the assigned staff (or an admin via the admin endpoint, see
-  below) can add notes. Returns the new note.
-- POST /api/staff/complaints/{id}/resolve — body: resolution_note
-  (non-empty required). Only the assigned staff. Writes a
-  complaint_notes row as the resolution note, then flips status to
-  RESOLVED. One transaction.
+- GET /api/staff/queries?status=OPEN — list unclaimed queries (the
+  pool). Default filter: status=OPEN. Notes NOT relevant here.
+- POST /api/staff/queries/{id}/claim — atomic claim. NO body.
+  Response includes derived claimed_at (server timestamp at claim,
+  not persisted).
+- GET /api/staff/queries?status=IN_PROGRESS&mine=true — list
+  queries claimed by this staff. Notes included.
+- GET /api/staff/queries/{id} — detail. Only if claimed by this
+  staff (404 otherwise, no-leak). Notes included.
+- POST /api/staff/queries/{id}/notes — add a note. Body: note
+  (non-empty). Only the claiming staff can add notes. Writes a
+  query_notes row: query_id SET, complaint_id NULL, author_id=
+  caller, note_text.
+- POST /api/staff/queries/{id}/resolve — body: resolution_note
+  (non-empty). Only the claiming staff. Writes a query_notes row
+  as resolution note, then flips status to RESOLVED in same tx.
 
-ADMIN (mirror of staff for note operations, since admins have full
-access):
-- POST /api/admin/complaints/{id}/notes — same as staff notes
-  endpoint, but admin can write notes on any complaint regardless of
-  assignment. author_id = the admin caller. Optional in this sub-phase
-  if API_DOC doesn't specify; state whether you built this. If not
-  built, admins can still resolve (which writes a note), but can't
-  add intermediate notes without temporarily assigning to themselves.
+ADMIN:
+- GET /api/admin/queries?status= — list all, filterable. Notes
+  included.
+- GET /api/admin/queries/{id} — detail with notes.
+- POST /api/admin/queries/{id}/resolve — body: resolution_note.
+  Admin can resolve any query regardless of claim. Same DB writes
+  as staff resolve (resolution-note row + status flip), but
+  author_id = the admin.
+- POST /api/admin/queries/{id}/notes — optional (per 7B's
+  symmetric admin-notes endpoint). State whether you built it. If
+  built, admin can add notes on any query; author_id = admin.
 
 === Authorization summary ===
 - Customer endpoints: customer role only. Wrong-customer → 404.
-- Admin endpoints: admin role only. Other roles → 403.
-- Staff endpoints: staff role only. Wrong-staff (not assigned) → 404.
-- Cross-role attempts (e.g., admin token on /api/staff/complaints):
-  reject 403. The role-scoping from Phase 2 already does this.
+- Staff endpoints: staff role only. Wrong-staff (not claimed) → 404.
+- Admin endpoints: admin role only. Cross-role attempts → 403.
+- Phase 2 role-scoping from /api/staff/** that 7B added already
+  handles the security config.
 
 === Notification scope (§5) ===
-- ONE notification type from 7B: COMPLAINT_ASSIGNED to the
-  assigned staff. Reassign fires another COMPLAINT_ASSIGNED to the
-  new staff.
-- ZERO customer-facing notifications (§5 — "Resolved" notifications
-  to customer are out of v1 scope).
-- ZERO notifications to admin (admins poll the list).
-- The notification message should reference the complaint and its
-  subject. Format per API_DOC if specified.
+- ZERO notification types fired from 7C. Queries are pull-model.
+- ZERO customer-facing, ZERO staff-facing, ZERO admin-facing.
+- Explicitly state this in the verification (grep QueryService
+  for notificationRepository or equivalent — should find zero
+  calls).
 
-=== complaint_notes write rules ===
-- complaint_id = the complaint (NOT NULL).
-- query_id = NULL (XOR constraint — 7C writes the inverse).
+=== query_notes write rules ===
+- query_id = the query (NOT NULL).
+- complaint_id = NULL (XOR — 7B writes the inverse).
 - author_id = caller (staff or admin).
-- note_text = the note content, non-empty.
+- note_text non-empty.
 - created_at = NOW().
-- Notes are append-only in 7B: no edit endpoint, no delete endpoint.
-  (Resolution-note becomes immutable history once the complaint is
-  resolved.)
+- Append-only: no edit, no delete endpoints in 7C.
 
-=== Status-transition guards ===
-- Assign on a complaint that's already RESOLVED → 400.
-- Resolve on a complaint that's OPEN (never assigned) → 400, message
-  like "Complaint must be assigned before resolution."
-- Resolve on a complaint that's already RESOLVED → 400 (idempotent
-  rejection, not a 200 no-op — same pattern as Phase 4's already-
-  approved turf).
-- Notes on a RESOLVED complaint: REJECT 400 (resolution closes the
-  complaint; no further notes). State this explicitly.
+=== JPA mapping caution (from 7A/7B) ===
+Apply the same preemptive caution from 7B's complaint mapping: do
+NOT set up Query with a bidirectional @OneToMany collection of
+notes with orphanRemoval=true. Use a plain @ManyToOne on QueryNote
+pointing to Query, with no inverse collection on Query. There is
+no delete-note endpoint in 7C so the silent-rollback bug from 7A
+cannot bite, but the mapping should be safe by design, not safe
+because no caller exercises it.
 
-=== JPA mapping hazard (from 7A) ===
-If you set up complaint_notes with a bidirectional @OneToMany from
-Complaint with orphanRemoval=true, you risk the same silent-rollback
-bug 7A surfaced when deleting a child via the child repo. 7B does
-not have a delete-note endpoint, so this may not bite — but state
-explicitly the mapping you used and confirm there's no path that
-would trigger orphanRemoval silent rollback. If in doubt, use the
-@Modifying JPQL pattern from 7A.
-
-=== Do NOT in 7B ===
-- No queries logic (7C — same complaint_notes table but with
-  query_id set, complaint_id NULL).
-- No customer-facing notifications.
+=== Do NOT in 7C ===
+- No picked_up_at column (DECISIONS §8).
+- No SELECT FOR UPDATE on the claim (atomic UPDATE-WHERE is the
+  pattern).
+- No customer-facing or any notification of any type.
 - No note edit or delete endpoints.
-- No "unassigned" notification to staff.
-- Do not modify Phase 5/6 booking lifecycle code.
-- Do not modify Phase 7A review code.
+- Do not modify Phase 5/6 booking-lifecycle code or 7A/7B
+  complaint/review code.
 
 === VERIFICATION — REAL executed, raw DB output ===
 
-1. Files modified; final endpoint list. State the complaint_notes
-   JPA mapping approach and confirm no orphanRemoval trap exists.
-   State whether you built /api/admin/complaints/{id}/notes (the
-   admin-side note write endpoint).
+1. Files modified; final endpoint list. State the QueryNote
+   JPA mapping approach (confirm no orphanRemoval trap exists).
+   State whether you built /api/admin/queries/{id}/notes.
 
 2. CUSTOMER CREATE happy path:
-   a. Customer X creates a complaint. Body: subject + description
-      (+ optionally booking_id). Show raw response.
-   b. Raw SELECT: complaints row with status=OPEN,
-      assigned_staff_id NULL, customer_id matching. Show.
+   a. Customer X creates a query. Show raw response.
+   b. Raw SELECT queries: row with status=OPEN, staff_id NULL.
 
-3. ADMIN ASSIGN:
-   a. Admin lists OPEN complaints — show the new one in the
-      response.
-   b. Admin assigns to staff S. Show raw response.
-   c. Raw SELECT: complaints row now has status=IN_PROGRESS,
-      assigned_staff_id=S.id. Show.
-   d. Raw SELECT notifications: a new row with type=COMPLAINT_ASSIGNED,
-      user_id=S.id (not customer, not admin). Show.
+3. STAFF POOL VIEW:
+   a. Staff S1 lists GET /api/staff/queries?status=OPEN. The new
+      query appears in the response.
+   b. State the list shape and the visible fields.
 
-4. ADMIN REASSIGN:
-   a. Admin reassigns the same complaint to a different staff S2.
-      Show raw response.
-   b. Raw SELECT: complaints.assigned_staff_id=S2.id, status still
-      IN_PROGRESS.
-   c. Raw SELECT notifications: a SECOND COMPLAINT_ASSIGNED row,
-      this one to S2. The first (to S) remains as historical.
-   d. No notification to S (the old assignee). State explicitly:
-      no UNASSIGNED-type rows in notifications table.
+4. ATOMIC CLAIM — happy path:
+   a. Staff S1 calls POST /api/staff/queries/{id}/claim.
+      Show raw response: query id, status=IN_PROGRESS, staff_id=S1
+      (NOT persisted in any picked_up_at column — derived
+      claimed_at present in response).
+   b. Raw SELECT queries: row now has status=IN_PROGRESS,
+      staff_id=S1.id. NO picked_up_at column exists (verify via
+      DESCRIBE queries; show the schema).
 
-5. STAFF NOTE WRITES:
-   a. Staff S2 (now assigned) adds a note. Show raw response.
-   b. Raw SELECT complaint_notes: row with complaint_id=this
-      complaint, query_id NULL (the XOR enforcement), author_id=S2.id,
-      note_text and created_at present.
-   c. Staff S (NOT assigned to this complaint) tries to add a note
-      → 404 (no-leak). Identical row counts.
+5. ATOMIC CLAIM — forced race (the substantive test):
+   a. Create a fresh query. Confirm status=OPEN via raw SELECT.
+   b. Force a race: open TWO connections (e.g., two curl calls
+      issued near-simultaneously, OR more deterministically, by
+      using a brief script or a debugger pause). Both call
+      /claim on the same query id.
+   c. EXPECTED: one returns 200/201 with success body. The other
+      returns 409 with "This query has already been claimed."
+      Show BOTH raw responses with their timestamps.
+   d. Raw SELECT queries: row has status=IN_PROGRESS, staff_id
+      set to ONE staff (the winner). Show the row.
+   e. State explicitly: "The atomic UPDATE ... WHERE status='OPEN'
+      handled this race without SELECT FOR UPDATE. The losing
+      transaction's UPDATE returned row count 0 because the WHERE
+      clause failed to match after the winning transaction
+      changed the row."
+   f. Notification scope: zero notifications created by either
+      claim (winning or losing). State the row count of
+      notifications before/after — IDENTICAL.
 
-6. ADMIN OVERRIDE-RESOLVE:
-   a. Admin resolves the complaint with a resolution_note. Show raw
-      response.
-   b. Raw SELECT complaints: status=RESOLVED.
-   c. Raw SELECT complaint_notes: a new row (the resolution note),
-      author_id=admin.id, complaint_id set, query_id NULL.
-   d. No new notification (§5 — no customer-facing resolved notif).
+6. STAFF NOTE WRITES (XOR closing — the other half of the
+   invariant):
+   a. Claiming staff adds a note. Show raw response.
+   b. Raw SELECT query_notes: row with query_id SET (matching),
+      complaint_id NULL, author_id=staff.id, note_text and
+      created_at present. THIS IS THE XOR INVERSE OF 7B's
+      complaint_notes rows.
+   c. Non-claiming staff tries to add a note on this query → 404,
+      no-leak. Identical row counts.
 
-7. STAFF RESOLVE happy path (separate complaint):
-   a. Create + assign a fresh complaint to staff S. Staff S resolves
-      with resolution_note.
-   b. Raw SELECT complaints: status=RESOLVED.
-   c. Raw SELECT complaint_notes: resolution note with author_id=S.id.
+7. STAFF RESOLVE happy path:
+   a. Claiming staff resolves with resolution_note. Show response.
+   b. Raw SELECT queries: status=RESOLVED.
+   c. Raw SELECT query_notes: a new row with the resolution note,
+      author_id = the staff who claimed.
+   d. Zero notifications created.
 
-8. STATUS-TRANSITION GUARDS — execute each:
-   a. Assign on a RESOLVED complaint → 400.
-   b. Resolve on an OPEN complaint (never assigned) → 400 with
-      message about needing assignment first.
-   c. Resolve on an already-RESOLVED complaint → 400 (not 200, not
-      idempotent silent success).
-   d. Add a note on a RESOLVED complaint → 400.
-   For each: identical before/after row counts on complaints,
-   complaint_notes, notifications.
+8. ADMIN OVERRIDE-RESOLVE:
+   a. Admin resolves a different (assigned-to-different-staff)
+      query with resolution_note. Show response.
+   b. Raw SELECT queries: status=RESOLVED.
+   c. Raw SELECT query_notes: resolution note with author_id =
+      the admin.
 
-9. AUTHORIZATION GUARDS:
-   a. Customer A tries to GET customer B's complaint → 404, no-leak.
-   b. Staff not assigned tries to GET the complaint detail → 404.
-   c. Customer tries to access /api/admin/complaints → 403.
-   d. Customer tries to access /api/staff/complaints → 403.
-   e. Required-field validation: empty subject, empty description,
-      empty resolution_note → 400 with clear messages.
+9. STATUS-TRANSITION GUARDS — execute each:
+   a. Claim on IN_PROGRESS → 409 (uniqueness — the claim slot is
+      taken).
+   b. Claim on RESOLVED → 409.
+   c. Resolve on OPEN (unclaimed) → 400 with the "must be claimed
+      first" message.
+   d. Resolve on RESOLVED → 400.
+   e. Add note on RESOLVED → 400.
+   For each: identical row counts on queries, query_notes,
+   notifications.
 
-10. XOR INVARIANT (preview for 7C):
-    State the complaint_notes rows from items 5–7. All have
-    complaint_id SET and query_id NULL. 7C will write the inverse.
-    Show ONE raw SELECT row to confirm: id, complaint_id (set),
-    query_id (NULL), author_id, note_text, created_at.
+10. AUTHORIZATION GUARDS:
+    a. Customer A GET customer B's query → 404 no-leak.
+    b. Non-claiming staff GET /queries/{id} → 404 (the query is
+       claimed by someone else; staff B should see 404, not 403).
+    c. Customer → admin endpoint → 403.
+    d. Customer → staff endpoint → 403.
+    e. Empty subject/description/resolution_note → 400 validation
+       with clear messages.
 
-11. §5: ALL notifications across this sub-phase. State:
-    - COMPLAINT_ASSIGNED rows: how many created, all targeting
-      staff user_ids (not customer, not admin).
-    - Zero customer-facing rows.
-    - Zero notifications to admins.
+11. XOR INVARIANT — STRUCTURAL VERIFICATION:
+    Execute these queries and paste raw output:
+    - SELECT COUNT(*) FROM complaint_notes WHERE complaint_id IS
+      NULL OR query_id IS NOT NULL;
+      Expected: 0 (all 7B-written rows have complaint_id SET,
+      query_id NULL).
+    - SELECT COUNT(*) FROM query_notes WHERE query_id IS NULL OR
+      complaint_id IS NOT NULL;
+      Expected: 0 (all 7C-written rows have query_id SET,
+      complaint_id NULL).
+    - SELECT one representative row from each side (one
+      complaint_notes row from 7B, one query_notes row from 7C),
+      showing the IS NULL / IS NOT NULL pattern is opposite.
+    State explicitly: the XOR is application-enforced (the schema
+    does not have a CHECK constraint or trigger). v2 polish could
+    add a DB-level CHECK if desired (no §8 violation — adding
+    constraints is not adding columns or tables).
 
-Do not begin 7C.
+12. §5 / NOTIFICATION ABSENCE:
+    a. Grep QueryService for notificationRepository calls or
+       equivalent — should be zero. State the grep output.
+    b. Across all of items 2–10, the notifications table row
+       count is unchanged from before any 7C activity. Show the
+       before/after counts.
+
+Phase 7 is complete after this. Do not begin Phase 8.
