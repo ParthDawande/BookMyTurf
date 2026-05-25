@@ -1,200 +1,190 @@
-PHASE 8A of 3 — Payouts: scheduled release (config-disabled), admin
-trigger endpoint, owner-facing payouts list.
+PHASE 8B-owner of 4 (Phase 8: 8A done, 8B-owner, 8B-admin, 8C) —
+Owner dashboard read endpoints.
 
-Standing rules apply. Stop and report. Do NOT start 8B. Reuse Phase 0
-error shape, Phase 2 security UNCHANGED. No 422. 404-not-403 for
-not-yours/not-existing. Real executed verification — raw DB SELECT
-output, raw before/after counts on the release job, no traced values.
+Standing rules apply. Stop and report. Do NOT start 8B-admin.
+Reuse Phase 0 error shape, Phase 2 security UNCHANGED. No 422.
+404-not-403. Real executed verification — raw DB SELECT comparing
+hand-computed totals against the API response, no traced values.
 
-SCOPE: payout state-transition from PENDING → PAID after the 24h hold
-window AND owner-facing list endpoints. The simulated release runs
-either via a Spring @Scheduled job (DISABLED by default in v1) OR via
-an admin-trigger endpoint. Same service method, two entry points.
+SCOPE: owner-facing dashboard aggregations. Pure read endpoints,
+no writes. The hard part is SQL precision — getting every
+carried-forward financial filter right.
 
 === Locked design (from Phase 8 framing) ===
-- Q1 = option (c): scheduler + admin trigger, scheduler disabled in v1.
-- New config property: app.payout.scheduler.enabled (default false in
-  tracked application.properties — explicitly literal false, not
-  reliant on @Value default).
-- New config property: app.payout.scheduler.fixed-rate-ms (the period
-  between runs when enabled; default 60000 = 1 minute, irrelevant
-  in v1 because scheduler is off, but settable for v2).
-- Existing config app.payout.hold-hours (=24) is reused as-is.
-- Service method: PayoutReleaseService.releaseEligiblePayouts() —
-  the unit of work, callable from both the @Scheduled wrapper and
-  the admin endpoint.
-- SELECT FOR UPDATE on each candidate payout row when flipping (to
-  serialize against a concurrent cancel that's also touching the
-  same row). Same pattern as 5B's sub-court lock.
+- Revenue formula: SUM(bookings.total_amount) for CONFIRMED +
+  COMPLETED bookings of this owner's turfs. REFUNDED and CANCELLED
+  excluded. NOT SUM(payments) - SUM(refunds) — see rationale below.
+- Date range filter: applies to bookings.booking_date (IST dates).
+  Convert IST date range to bounds using the Phase 6B/8A pattern.
+  Payouts dashboard items use payouts.scheduled_at (separate
+  filter, already established in 8A).
+- Owner scoping: every aggregation traverses bookings → sub_courts
+  → turfs → owner_id WHERE owner_id = caller.
 
-=== The release logic ===
-1. Find all payouts WHERE status = 'PENDING'
-   AND scheduled_at <= NOW().
-2. For each, in its own @Transactional method:
-   - SELECT ... FOR UPDATE on the payouts row.
-   - Re-read its status under the lock — if not PENDING anymore
-     (race against cancel), skip.
-   - Re-read scheduled_at under the lock — if scheduled_at > NOW()
-     (defensive), skip.
-   - Set status = 'PAID', set paid_at = NOW().
-   - Emit OWNER notification: PAYOUT_RELEASED (state the exact type
-     used and message format).
-   - Commit.
-3. Return count of payouts processed.
+=== Carried-forward financial contracts to apply ===
+1. Race-recovery rows have booking_id IS NULL. NOT applicable to
+   bookings/payouts queries directly (those rows live in payments/
+   refunds, not bookings). State this explicitly in your report.
+2. bookings.total_amount is the source of truth for current state.
+   Use this for revenue, not sum-of-payments.
+3. payment_method is opaque varchar — irrelevant for dashboard
+   aggregations.
+4. Tz pattern (carried from 6B-i, 6C-ii, 6C-iii, 8A): convert IST
+   dates to Instant boundaries via .atStartOfDay() in Asia/Kolkata
+   for from_date and .atTime(LocalTime.MAX) for to_date. Compare
+   against booking_date directly when possible (since booking_date
+   is a date, not a timestamp), or convert booking_date through
+   the same zone.
 
-=== Timezone handling (carried-forward Phase 6B/6C pattern) ===
-- scheduled_at is stored as Instant (UTC).
-- "NOW" for comparison is Instant.now() (UTC).
-- DO NOT compare LocalDateTime to LocalDateTime relying on the JVM
-  default zone.
-- Quote the exact comparison line in your report.
+=== Endpoints to build ===
 
-=== Schema column: paid_at ===
-- The payouts table has a paid_at column per the original schema
-  (or, if not, it needs adding — state which). On release, set
-  paid_at = Instant.now() (UTC). When status = CANCELLED (from 6B
-  cancel logic), paid_at stays NULL.
-- If paid_at doesn't exist in the schema, ADD it as a deviation
-  (DATETIME(6) nullable). Same kind of deviation as the
-  Phase 7 resolved_at columns — persistent state-transition
-  timestamp for dashboard use.
+GET /api/owner/dashboard
+  Query parameters (all optional):
+    from_date (IST date, YYYY-MM-DD)
+    to_date   (IST date, YYYY-MM-DD)
+    turf_id   (filter to a specific turf this owner owns;
+               wrong-owner → 404)
+  Response (JSON):
+    {
+      "total_revenue": <BigDecimal — SUM(total_amount) for
+                       CONFIRMED+COMPLETED in scope>,
+      "total_commission": <BigDecimal — SUM(commission_amount)
+                          for CONFIRMED+COMPLETED in scope; this is
+                          what the platform deducts; owner sees this
+                          for transparency>,
+      "owner_payout_total": <BigDecimal — total_revenue minus
+                            total_commission, the owner's gross>,
+      "bookings_by_status": {
+        "CONFIRMED": <count>,
+        "COMPLETED": <count>,
+        "CANCELLED": <count>,
+        "REFUNDED":  <count>
+      },
+      "payouts_summary": {
+        "pending_amount": <SUM(amount) WHERE status=PENDING>,
+        "paid_amount":    <SUM(amount) WHERE status=PAID>,
+        "cancelled_amount":<SUM(amount) WHERE status=CANCELLED>
+      },
+      "filters": {
+        "from_date": "YYYY-MM-DD" or null,
+        "to_date":   "YYYY-MM-DD" or null,
+        "turf_id":   <id> or null
+      }
+    }
 
-=== Admin trigger endpoint ===
-- POST /api/admin/payouts/run-release (per API_DOC; if not specified,
-  use this path).
-- No body. Returns the count of payouts released and the list of
-  released payout IDs.
-- Admin role only. Other roles → 403.
-- Calls the same PayoutReleaseService.releaseEligiblePayouts().
+  Behavior:
+  - bookings_by_status counts: filter by booking_date range if
+    given. All four statuses ALWAYS appear in the response, with
+    0 if no bookings match.
+  - revenue/commission/payout: filter by booking_date range,
+    CONFIRMED+COMPLETED only.
+  - payouts_summary: filter by payouts.scheduled_at range (NOT
+    booking_date — payouts have their own date dimension). Show
+    all three statuses always, zero if no rows.
+  - All sums use BigDecimal (HALF_UP for any rounding that occurs
+    on the SUM, though SUMs of stored DECIMAL(10,2) shouldn't need
+    rounding).
 
-=== Owner-facing payouts list ===
-- GET /api/owner/payouts — list payouts for the owner's turfs.
-  Paginated per API_DOC.
-- Filterable by status (PENDING, PAID, CANCELLED — or none for all).
-- Filterable by date range (from_date, to_date as IST date strings).
-  Date range filter applies to scheduled_at: convert IST date to
-  Instant bounds (atStartOfDay / endOfDay 23:59:59.999999999 in
-  Asia/Kolkata) and use those as the SQL bounds. Same tz pattern as
-  6B/6C-iii.
-- Response includes: payout id, booking id (with maybe basic booking
-  info like turf name + booking_date), amount, status, scheduled_at,
-  paid_at (if PAID), created_at.
-
-=== The carried-forward filter on payouts ===
-- payouts always have booking_id NOT NULL by construction (every
-  payout is for a specific booking). There's no "race-recovery"
-  payout shape. The booking_id IS NULL filter from earlier phases
-  applies to payments/refunds, not payouts. State this explicitly.
-- A payout for a booking that has REFUNDED or has its booking_id
-  in a CANCELLED state may itself be CANCELLED (from 6B cancel
-  logic). Those should show in the owner's list with status =
-  CANCELLED.
+=== Optional: per-turf breakdown ===
+If API_DOC specifies a per-turf breakdown shape, include it; if
+not, defer to admin dashboard (Phase 8B-admin) — the owner
+dashboard in v1 is the cross-turf summary. State whether you
+included per-turf breakdown.
 
 === Owner scoping (no cross-owner leak) ===
-- An owner viewing /api/owner/payouts sees ONLY their own payouts
-  (via the booking → sub-court → turf → owner chain).
-- An owner viewing /api/owner/payouts/{id} where the payout belongs
-  to another owner → 404 (no-leak, same as Phase 3 turf access).
+- The dashboard query joins bookings → sub_courts → turfs and
+  filters WHERE turfs.owner_id = :callerId.
+- If turf_id is specified and that turf is not owned by the caller
+  → 404 (no-leak, same as Phase 3 turf access).
 
-=== Do NOT in 8A ===
-- No dashboard aggregations (8B).
+=== Do NOT in 8B-owner ===
+- No admin dashboard (8B-admin).
 - No notifications list endpoints (8C).
-- Do NOT enable the scheduler in tracked application.properties.
-  Default app.payout.scheduler.enabled=false. The scheduler code
-  must check this flag before doing anything.
-- Do not modify any Phase 5/6/7 code.
-- No customer-facing notifications.
+- Do not modify any Phase 5/6/7/8A code.
+- Do not add new tables or columns (DECISIONS §8 — read
+  aggregations don't need them).
+- No customer-facing notifications (dashboard is a read endpoint,
+  fires nothing).
 
 === VERIFICATION — REAL executed, raw output ===
 
-1. Files modified; final list of endpoints. State whether you added
-   paid_at as a schema deviation. State the JPA mapping for payouts
-   (should be unchanged). Quote the exact Instant.now() comparison
-   line.
+1. Files modified; the dashboard service method's full body
+   (or the key SQL/JPQL queries). Quote the booking_date range
+   conversion and the join chain showing owner scoping.
 
-2. SCHEDULER WIRING — verify it's correctly disabled by default:
-   a. Tracked application.properties has app.payout.scheduler.enabled=
-      false literally present. Show the grep.
-   b. Start the server with default config. Confirm in startup logs
-      that the scheduler does NOT register. Quote the log line that
-      either says "scheduler disabled" or shows the absence of any
-      "PayoutRelease" scheduler registration.
-   c. Briefly enable it (set true in application-local.properties,
-      restart). Confirm it registers and fires at least once within
-      the configured fixed-rate window. Show the log line confirming
-      it ran. State the count of payouts it processed on that run.
-   d. Disable it again (false in application-local). Restart.
-      Confirm it's off.
+2. HAND-VERIFIED COUNTS — this is the gate. Pick an owner with
+   real test data from earlier phases (likely the same owner 20
+   used across 6B, 6C, 8A). Execute the dashboard call without
+   date filters and show:
+   a. Raw HTTP response (the full JSON).
+   b. RAW SELECT queries against the DB, hand-executed:
+      - SELECT status, COUNT(*) FROM bookings WHERE id IN
+        (SELECT b.id FROM bookings b JOIN sub_courts sc ON
+        b.sub_court_id=sc.id JOIN turfs t ON sc.turf_id=t.id
+        WHERE t.owner_id=:ownerId) GROUP BY status;
+        — Compare each count to the response's bookings_by_status.
+      - SELECT SUM(total_amount), SUM(commission_amount) FROM
+        bookings ... (same join) WHERE status IN
+        ('CONFIRMED','COMPLETED');
+        — Compare to total_revenue and total_commission.
+      - SELECT status, SUM(amount) FROM payouts ... WHERE
+        booking_id IN (SELECT b.id FROM bookings...) GROUP BY
+        status;
+        — Compare to payouts_summary.
+   c. State explicitly: "API response total_revenue = <X>; hand-
+      computed via raw SELECT = <Y>; match: yes/no." Same for every
+      other field. If any mismatch, debug and re-run.
 
-3. ADMIN TRIGGER endpoint:
-   a. Admin calls POST /api/admin/payouts/run-release. Show raw
-      HTTP response.
-   b. State the count of payouts released (likely 0 in the initial
-      run because all existing payouts from earlier phases have
-      scheduled_at far in the future or were CANCELLED).
-   c. Stage an eligible payout: take a CONFIRMED booking from
-      earlier phases (or stage a new one), UPDATE its payouts row
-      to set status=PENDING and scheduled_at = NOW() - INTERVAL 1
-      HOUR (i.e., overdue). State the payout id and the booking id.
-   d. Admin re-triggers. Show response. The count should now be 1
-      (or more if other staged eligible).
-   e. Raw SELECT post-trigger:
-      - payouts row: status=PAID, paid_at = the timestamp around
-        when the trigger ran (within seconds of NOW). Show the row.
-      - notifications: a new PAYOUT_RELEASED row to the owner
-        (user_id of the owner of the turf). Show.
-   f. Customer-side: confirm zero customer-facing notifications
-      from the release (§5 — payout is owner-internal).
+3. DATE RANGE filter — verify the IST boundary case:
+   a. Pick a date range with a known boundary case (e.g., a booking
+      on IST 2026-08-31 with booking_date='2026-08-31'). Call
+      ?from_date=2026-08-01&to_date=2026-08-31. The August booking
+      should be IN the response counts. Hand-verify against
+      WHERE booking_date BETWEEN '2026-08-01' AND '2026-08-31'.
+   b. Call ?from_date=2026-09-01&to_date=2026-09-30. The August
+      booking should NOT be counted.
+   c. Show both responses and hand-verify the boundary.
 
-4. OWNER LIST endpoint:
-   a. Owner GET /api/owner/payouts. Show raw response. Verify:
-      - the owner's own payouts appear (the one just released as
-        PAID, any others as PENDING, any CANCELLED from earlier
-        6B cancel tests).
-      - sorting/pagination per API_DOC (default order).
-   b. Owner GET /api/owner/payouts?status=PENDING. Show. Only
-      PENDING rows.
-   c. Owner GET /api/owner/payouts?status=PAID. Show. Only PAID
-      rows.
-   d. Owner GET /api/owner/payouts?from_date=2026-05-01&to_date=
-      2026-05-31 (or whatever range covers your test data). Show.
-      Verify only payouts whose scheduled_at falls in that IST
-      date range are returned. The IST → Instant conversion must
-      be correct (a payout scheduled for IST 2026-05-31 23:30
-      should be IN the range, not excluded).
+4. TURF FILTER:
+   a. Owner has multiple turfs. Call ?turf_id=<one of theirs>.
+      Response numbers should reflect only that turf.
+   b. Owner calls ?turf_id=<owned by a different owner> → 404
+      no-leak.
 
-5. OWNER 404-no-leak: owner A tries to GET /api/owner/payouts/{id}
-   where {id} belongs to owner B → 404. Identical row counts.
+5. OWNER SCOPING:
+   a. Different owner (owner B) calls /api/owner/dashboard. Their
+      numbers should reflect ONLY their data, not owner A's.
+   b. Customer or staff calls /api/owner/dashboard → 403.
 
-6. CONCURRENCY (the race-against-cancel) — execute if you can stage
-   it cleanly; otherwise document the code path:
-   a. Take a CONFIRMED booking with a PENDING payout whose
-      scheduled_at is set to NOW() - 1 hour (eligible).
-   b. Force a race: trigger the release endpoint AND a customer-
-      cancel endpoint in near-simultaneous calls (two terminals,
-      or a script).
-   c. EXPECTED outcomes (state which observed):
-      - If release wins: payout flips to PAID, then cancel sees
-        status=PAID, refunds the customer anyway (per 6B's existing
-        logic), payouts.status stays PAID (or gets set to CANCELLED
-        if the cancel logic overrides — state which your 6B code
-        does), booking REFUNDED. The customer's money is back; the
-        owner's payout is in an awkward state.
-      - If cancel wins: payouts.status=CANCELLED, then release sees
-        status=CANCELLED, skips.
-      Either is acceptable per the 6B design. Document which
-      occurred.
-   d. If staging is impractical, paste the relevant code paths
-      from PayoutReleaseService and BookingService.cancel showing
-      the SELECT FOR UPDATE on payouts in both — proving they
-      serialize against each other rather than racing.
+6. PAYOUTS DATE FILTER independence:
+   - The payouts_summary should respect from_date/to_date if those
+     filter on scheduled_at semantics. State whether your
+     implementation uses the same from_date/to_date for both
+     bookings and payouts (probably reasonable since the customer
+     gave one date range) OR uses booking_date for bookings and
+     scheduled_at for payouts (more accurate).
+   - State explicitly your choice. Both are defensible.
 
-7. §5: zero customer-facing notifications across all tests. Only
-   PAYOUT_RELEASED rows to owners are created. State the count.
+7. ZERO-STATE BEHAVIOR: pick or stage an owner with no bookings.
+   The dashboard should return:
+   - bookings_by_status: all four statuses = 0 (the dict is fully
+     present, not an empty object).
+   - revenue/commission/payout: all 0 (not null).
+   - payouts_summary: all three statuses = 0.
+   Show the raw response.
 
-8. SCHEDULER HYGIENE: confirm tracked application.properties has
-   the flag literally false at the end; application-local has it
-   false. Repo Select-String for "payout.scheduler.enabled" finds
-   only those two literal-false lines.
+8. RACE-RECOVERY EXCLUSION (carried-forward contract 1):
+   State explicitly: payouts query filters by booking_id (joining
+   through bookings → turfs → owner). Race-recovery payments and
+   refunds rows live in the payments/refunds tables with
+   booking_id IS NULL, but the dashboard's payouts_summary queries
+   the payouts table — which always has booking_id NOT NULL by
+   construction (every payout is for a specific booking, no
+   race-recovery payouts exist). So the IS NULL filter is N/A for
+   this endpoint. Confirm this in code: show that no SQL in the
+   dashboard service touches payments or refunds tables directly.
 
-Do not begin 8B.
+9. §5: zero notifications created by dashboard calls. The endpoint
+   is read-only by contract.
+
+Do not begin 8B-admin.

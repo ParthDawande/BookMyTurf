@@ -42,4 +42,15 @@ public interface PayoutRepository extends JpaRepository<Payout, Long> {
 
     @Query("SELECT p FROM Payout p WHERE p.owner.id = :ownerId AND p.status = :status AND p.scheduledAt >= :from AND p.scheduledAt <= :to ORDER BY p.scheduledAt DESC")
     Page<Payout> findByOwnerIdAndStatusAndDateRange(@Param("ownerId") Long ownerId, @Param("status") PayoutStatus status, @Param("from") LocalDateTime from, @Param("to") LocalDateTime to, Pageable pageable);
+
+    // Dashboard: amount grouped by status for owner, filtered by scheduledAt range (IST-converted UTC bounds).
+    // Only returns rows for statuses that have data; caller zero-fills the rest.
+    @Query("SELECT p.status, COALESCE(SUM(p.amount), 0) FROM Payout p " +
+           "WHERE p.owner.id = :ownerId " +
+           "AND (:from IS NULL OR p.scheduledAt >= :from) " +
+           "AND (:to IS NULL OR p.scheduledAt <= :to) " +
+           "GROUP BY p.status")
+    List<Object[]> payoutSummaryByOwner(@Param("ownerId") Long ownerId,
+                                         @Param("from") LocalDateTime from,
+                                         @Param("to") LocalDateTime to);
 }

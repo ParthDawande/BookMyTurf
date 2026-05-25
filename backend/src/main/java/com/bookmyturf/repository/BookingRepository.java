@@ -8,6 +8,7 @@ import org.springframework.data.repository.query.Param;
 
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Optional;
 
 public interface BookingRepository extends JpaRepository<Booking, Long> {
 
@@ -31,4 +32,32 @@ public interface BookingRepository extends JpaRepository<Booking, Long> {
     @Query("SELECT COUNT(b) FROM Booking b WHERE b.subCourt.id = :id AND b.status IN :statuses")
     long countBySubCourtIdAndStatusIn(@Param("id") Long id,
                                       @Param("statuses") List<BookingStatus> statuses);
+
+    // Dashboard aggregations — owner-scoped via booking → sub_court → turf → owner_id.
+    // booking_date is a LocalDate column: compare directly with LocalDate params (no TZ conversion).
+
+    @Query("SELECT b.status, COUNT(b) FROM Booking b " +
+           "JOIN b.subCourt sc JOIN sc.turf t " +
+           "WHERE t.owner.id = :ownerId " +
+           "AND (:turfId IS NULL OR t.id = :turfId) " +
+           "AND (:fromDate IS NULL OR b.bookingDate >= :fromDate) " +
+           "AND (:toDate IS NULL OR b.bookingDate <= :toDate) " +
+           "GROUP BY b.status")
+    List<Object[]> countByStatusForOwner(@Param("ownerId") Long ownerId,
+                                          @Param("turfId") Long turfId,
+                                          @Param("fromDate") LocalDate fromDate,
+                                          @Param("toDate") LocalDate toDate);
+
+    @Query("SELECT COALESCE(SUM(b.totalAmount), 0), COALESCE(SUM(b.commissionAmount), 0) FROM Booking b " +
+           "JOIN b.subCourt sc JOIN sc.turf t " +
+           "WHERE t.owner.id = :ownerId " +
+           "AND b.status IN :statuses " +
+           "AND (:turfId IS NULL OR t.id = :turfId) " +
+           "AND (:fromDate IS NULL OR b.bookingDate >= :fromDate) " +
+           "AND (:toDate IS NULL OR b.bookingDate <= :toDate)")
+    List<Object[]> revenueByOwner(@Param("ownerId") Long ownerId,
+                                   @Param("statuses") List<BookingStatus> statuses,
+                                   @Param("turfId") Long turfId,
+                                   @Param("fromDate") LocalDate fromDate,
+                                   @Param("toDate") LocalDate toDate);
 }
