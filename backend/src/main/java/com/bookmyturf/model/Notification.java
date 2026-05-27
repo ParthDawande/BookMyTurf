@@ -29,6 +29,9 @@ public class Notification {
     @Column(name = "is_read")
     private Boolean isRead = false;
 
+    @Column(name = "read_at")
+    private LocalDateTime readAt;
+
     @Column(name = "created_at", updatable = false)
     private LocalDateTime createdAt;
 

@@ -1,232 +1,203 @@
-PHASE 8B-admin of 4 — Admin dashboard read endpoint.
+PHASE 8C of 3 — Notifications list endpoints. Phase 8 ends here,
+and the backend is complete.
 
-Standing rules apply. Stop and report. Do NOT start 8C. Reuse Phase 0
-error shape, Phase 2 security UNCHANGED. No 422. No 404-on-existing
-(admin sees everything). Real executed verification — raw DB SELECT
-comparing hand-computed totals against the API response, no traced
-values.
+Standing rules apply. Stop and report. After acceptance, Phase 8 is
+complete and the backend is done. Reuse Phase 0 error shape, Phase 2
+security UNCHANGED. No 422. 404-not-403 for not-yours. Real executed
+verification — raw DB SELECT, no traced values.
 
-SCOPE: admin-facing dashboard aggregations. Platform-wide reads, no
-owner scoping (admin has full visibility). New aggregations beyond
-8B-owner: pending approvals, open complaints/queries, active users by
-role, platform commission revenue.
+SCOPE: three notification read/update endpoints accessible by ALL
+authenticated user roles. The endpoints scope by caller's user_id —
+each user only ever sees their own notifications.
 
-=== Locked design (from 8B-owner acceptance) ===
-- Date range filter: applies to bookings.booking_date for
-  booking-domain queries, payouts.scheduled_at for payout-domain
-  queries. Same dual-domain rule as 8B-owner — one UI date range,
-  two different SQL columns.
-- Revenue formula: SUM(bookings.total_amount) for CONFIRMED +
-  COMPLETED, platform-wide (no WHERE owner_id clause).
-- Platform commission = SUM(bookings.commission_amount) for
-  CONFIRMED + COMPLETED. THIS is what the platform actually earned.
-- All sums use BigDecimal.
-- Tz pattern: booking_date is LocalDate, compared directly; for
-  scheduled_at use the same .atStartOfDay() Asia/Kolkata → Instant
-  bounds pattern from 8A / 8B-owner.
+=== Endpoints ===
 
-=== Endpoint ===
-
-GET /api/admin/dashboard
+GET /api/notifications
+  Authenticated, any role. Lists the caller's own notifications.
   Query parameters (all optional):
-    from_date (IST date, YYYY-MM-DD)
-    to_date   (IST date, YYYY-MM-DD)
-    (NO turf_id, NO owner_id — admin is platform-wide. If
-    API_DOC specifies admin-side drill-down filters, follow it
-    and state which.)
-  Response (JSON):
+    page (default 0)
+    size (default per API_DOC; if unspecified, default 20)
+    is_read (optional: true/false; default omitted = all)
+  Sort: most recent first (created_at DESC). State this explicitly.
+  Response shape per API_DOC. Each item:
     {
-      "total_revenue":      <SUM(bookings.total_amount) for
-                            CONFIRMED+COMPLETED in date scope —
-                            platform-wide gross>,
-      "platform_commission":<SUM(bookings.commission_amount) for
-                            CONFIRMED+COMPLETED — what the platform
-                            earned>,
-      "owners_payout_total":<total_revenue minus
-                             platform_commission — the gross paid
-                             to all owners>,
-      "bookings_by_status": {
-        "CONFIRMED": <count>,
-        "COMPLETED": <count>,
-        "CANCELLED": <count>,
-        "REFUNDED":  <count>
-      },
-      "payouts_summary": {
-        "pending_amount":   <SUM WHERE status=PENDING — date
-                            filter on scheduled_at>,
-        "paid_amount":      <SUM WHERE status=PAID>,
-        "cancelled_amount": <SUM WHERE status=CANCELLED>
-      },
-      "pending_approvals": {
-        "turfs":      <count of turfs WHERE status=PENDING>,
-        "sub_courts": <count of sub_courts WHERE status=PENDING>
-      },
-      "open_complaints": <count of complaints WHERE status IN
-                          ('OPEN','IN_PROGRESS')>,
-      "open_queries":    <count of queries WHERE status IN
-                          ('OPEN','IN_PROGRESS')>,
-      "active_users": {
-        "customers": <count of users WHERE role='CUSTOMER' AND
-                     status='ACTIVE'>,
-        "owners":    <count WHERE role='OWNER' AND status='ACTIVE'>,
-        "staff":     <count WHERE role='STAFF' AND status='ACTIVE'>
-      },
-      "filters": {
-        "from_date": "YYYY-MM-DD" or null,
-        "to_date":   "YYYY-MM-DD" or null
-      }
+      "id": <long>,
+      "type": "<NotificationType enum string>",
+      "message": "<string>",
+      "is_read": <bool>,
+      "created_at": "<ISO timestamp>"
+    }
+  Plus paging metadata per API_DOC (total, page, size, etc.).
+
+PUT /api/notifications/{id}/read
+  Authenticated, any role. Marks the specified notification as
+  read. Idempotent: PUT-ing an already-read notification returns
+  200 with the current state (NOT 400, NOT a no-op silent
+  response — the response body should consistently show the
+  current state).
+  Authorization: caller must own the notification (user_id matches).
+  Wrong-user → 404 (no-leak, NOT 403).
+  Response:
+    {
+      "id": <id>,
+      "is_read": true,
+      "read_at": "<ISO timestamp of when this read occurred>" or
+                 the original read timestamp if it was already read.
     }
 
-  Behavior:
-  - bookings_by_status: filter by booking_date range. All four
-    statuses ALWAYS present, 0 if no rows match.
-  - total_revenue / platform_commission / owners_payout_total:
-    filter by booking_date, CONFIRMED+COMPLETED only.
-  - payouts_summary: filter by scheduled_at (IST→UTC bounds, same
-    as 8B-owner). All three statuses always present.
-  - pending_approvals: NO date filter. Approvals queue is a snapshot
-    of current state, not a historical aggregate. State this
-    explicitly.
-  - open_complaints / open_queries: NO date filter, same rationale —
-    snapshot of current operational queue, not a historical
-    aggregate.
-  - active_users: NO date filter — it's a current-state snapshot.
-    Count users WHERE status='ACTIVE' (the per-request DB status
-    check from Phase 2 already filters out banned/suspended; we
-    count the role-filtered ACTIVE subset).
+PUT /api/notifications/mark-all-read
+  Authenticated, any role. Bulk-marks all the caller's unread
+  notifications as read.
+  No body. Idempotent: if no unread, returns 200 with count=0.
+  Response:
+    {
+      "marked_count": <integer — number of notifications flipped
+                       from unread to read in this call>
+    }
+  This is a single SQL update for performance:
+    UPDATE notifications SET is_read=1, read_at=NOW()
+    WHERE user_id=:caller AND is_read=0
+  The marked_count is the rowsAffected.
 
-=== Why the new fields have no date filter ===
-- Pending approvals, open complaints/queries, active users are
-  CURRENT operational snapshots. An admin asking "what's on my
-  plate right now" doesn't want "things that were pending in
-  May 2026" — they want the current backlog.
-- Bookings/revenue/payouts are HISTORICAL aggregates by their
-  nature, so the date filter makes sense there.
-- State this rule explicitly in the report.
+=== Schema notes ===
+- The notifications table has user_id (FK), type (enum), message,
+  is_read (boolean default false), created_at, and per the schema
+  may or may not have read_at. State what columns exist via
+  DESCRIBE notifications.
+- If read_at doesn't exist, add it as a sub-§8 deviation (DATETIME(6)
+  nullable). Same kind of additive timestamp as Phase 7's
+  resolved_at — persistent state-transition timestamp, useful for
+  the response body. State the deviation if added.
+- If read_at already exists, use it. Mark-as-read writes
+  read_at = NOW(); mark-all-read writes the same; unread state has
+  read_at = NULL.
 
-=== Admin role-scoping ===
-- Admin role only. Other roles (CUSTOMER, OWNER, STAFF) → 403.
-- Phase 2 security routing already enforces this for /api/admin/**.
-- No 404 cases (admin sees everything; nothing to leak).
+=== Per-user filtering (THE critical invariant) ===
+- EVERY endpoint filters by user_id = caller. No cross-user leak
+  is acceptable.
+- The Phase 2 auth filter provides the caller's id; the service
+  uses it without trust-of-input.
+- GET /api/notifications: WHERE user_id=:caller.
+- PUT /api/notifications/{id}/read: WHERE id=:id AND user_id=:caller
+  (atomic — if rows affected = 0, return 404 because either the
+  notification doesn't exist or doesn't belong to caller, indistinguishable).
+- PUT /api/notifications/mark-all-read: WHERE user_id=:caller AND
+  is_read=0 (rows affected = marked_count).
 
-=== Carried-forward contracts applied ===
-1. Race-recovery rows (booking_id IS NULL in payments/refunds): the
-   dashboard never queries payments or refunds, so structurally N/A.
-   State explicitly.
-2. bookings.total_amount is the source of truth — DO NOT sum
-   payments minus refunds.
-3. opaque payment_method: irrelevant for dashboard aggregations,
-   never appears.
-4. Tz pattern from 6B/6C/8A/8B-owner: explicit Asia/Kolkata
-   conversion for scheduled_at bounds.
-5. status filters:
-   - Revenue: CONFIRMED + COMPLETED.
-   - Active users: status='ACTIVE'.
-   - Pending approvals: turfs.status='PENDING',
-     sub_courts.status='PENDING'.
-   - Open operational items: complaints.status IN
-     ('OPEN','IN_PROGRESS'), same for queries.
+=== Idempotency on PUT /{id}/read ===
+- Already-read notification PUT → 200 with current state.
+- Never-read notification PUT → 200 with is_read=true, read_at=NOW().
+- Wrong-user notification PUT → 404 (the atomic-UPDATE-by-row-count
+  approach naturally produces this: rows affected = 0 → return 404).
+- Race condition: two callers' simultaneous PUT on the same
+  notification — handled by the atomic UPDATE. Whichever wins
+  first sets read_at; the second's UPDATE affects 0 rows (because
+  is_read=0 no longer matches), and we return 200 with the existing
+  state (re-SELECT the row after the UPDATE). State explicitly
+  how you handled this — straightforward atomic-UPDATE-then-SELECT
+  is fine for v1.
 
-=== Active-users count: tiebreaker on the per-request DB status check ===
-The Phase 2 security filter does a per-request DB status check on
-the calling user. The active_users count in 8B-admin is a snapshot
-of stored status; it does NOT re-validate every user's currentness.
-For v1 this is fine — banned users have status='BANNED' or
-'SUSPENDED' written to the DB by Phase 4's admin actions; ACTIVE
-means literally what the column says. State this so future-you
-doesn't worry the count drifts from "real" activity.
+=== Carried-forward checkpoints ===
+1. Phase 0 error shape on every error response.
+2. Phase 2 security: per-request DB status check still fires
+   (banned/suspended users can't read notifications even with valid
+   token). Don't break this.
+3. No 422. 404 for not-yours. State this is preserved.
+4. §5: ALL existing notifications come from owner-directed types
+   (BOOKING_CANCELLED, BOOKING_RESCHEDULED, TURF_APPROVED, etc.),
+   staff-directed COMPLAINT_ASSIGNED, and from 8A PAYOUT_RELEASED.
+   ZERO customer-facing types exist in the notifications table.
+   8C reads them but does not create new ones. State explicitly
+   that 8C creates no new notifications and the §5 absence is
+   preserved.
 
-=== Do NOT in 8B-admin ===
-- No per-owner drill-down breakdown (out of v1 scope; if API_DOC
-  specifies it, follow API_DOC; otherwise skip).
-- No notifications list (8C).
-- Do not modify any prior phase code, including 8B-owner's
-  endpoint or service.
-- No customer-facing notifications (read endpoint, fires nothing).
+=== Do NOT in 8C ===
+- No new notification types or write endpoints (8C is read-only;
+  notifications are created by Phase 4/5/6/7/8A endpoints).
+- No admin-level "view all notifications" endpoint (out of scope;
+  not in API_DOC).
+- No deletion endpoint (the notifications table is append-only
+  in v1).
+- Do not modify any prior phase code.
 - Do not weaken Phase 2 security.
 
-=== VERIFICATION — REAL executed, raw SELECT output ===
+=== VERIFICATION — REAL executed, raw output ===
 
-1. Files modified; the service method body or key SQL/JPQL
-   queries. Quote the booking_date range conversion (should be
-   trivial — direct LocalDate compare). Quote the scheduled_at
-   bounds conversion (should match 8B-owner's pattern). State
-   the join chain for each aggregation (or "no join, direct
-   table" if standalone).
+1. Files modified; the three endpoint paths and key SQL/JPQL.
+   State whether you added read_at as a schema deviation.
 
-2. HAND-VERIFIED COUNTS — the substantive gate. Execute the
-   dashboard call without date filters and show:
-   a. Raw HTTP response (full JSON).
-   b. RAW SELECT for EACH field, hand-executed:
-      - bookings_by_status: SELECT status, COUNT(*) FROM bookings
-        GROUP BY status; — should be every booking platform-wide,
-        not just owner 20's.
-      - revenue/commission: SELECT SUM(total_amount),
-        SUM(commission_amount) FROM bookings WHERE status IN
-        ('CONFIRMED','COMPLETED');
-      - payouts_summary: SELECT status, SUM(amount) FROM payouts
-        GROUP BY status;
-      - pending_approvals.turfs: SELECT COUNT(*) FROM turfs WHERE
-        status='PENDING';
-      - pending_approvals.sub_courts: SELECT COUNT(*) FROM
-        sub_courts WHERE status='PENDING';
-      - open_complaints: SELECT COUNT(*) FROM complaints WHERE
-        status IN ('OPEN','IN_PROGRESS');
-      - open_queries: SELECT COUNT(*) FROM queries WHERE status
-        IN ('OPEN','IN_PROGRESS');
-      - active_users: SELECT role, COUNT(*) FROM users WHERE
-        status='ACTIVE' GROUP BY role;
-   c. For EACH field: state explicitly "API says X; DB says Y;
-      match: yes/no." If any mismatch, debug and re-run.
-   d. Sanity arithmetic: total_revenue − platform_commission
-      should equal owners_payout_total exactly. Confirm.
+2. LIST endpoint behavior — execute as multiple roles:
+   a. Owner 20 (the main test owner across the build): GET
+      /api/notifications without filters. Show the raw response
+      with paging metadata. State the count of returned items
+      and verify against raw SELECT WHERE user_id=20.
+   b. Customer X (from earlier phases — should have ZERO
+      notifications per §5): GET /api/notifications. Response
+      shows empty list, total=0. This is the proof §5 holds
+      from the user-facing side too — customers never have
+      notifications.
+   c. Staff member who got COMPLAINT_ASSIGNED in 7B: GET
+      /api/notifications. Show that they see their
+      COMPLAINT_ASSIGNED rows.
+   d. Filter by is_read=false on owner 20: returns only unread.
+      Show count.
+   e. Filter by is_read=true: returns only read. (Probably empty
+      currently since nothing has been read yet — that's fine.)
+   f. Most-recent-first sort confirmed: the first item's
+      created_at is greater than or equal to the last item's.
 
-3. DATE RANGE filter:
-   a. ?from_date=2026-08-01&to_date=2026-08-31 — show response.
-      Bookings filtered to August booking_dates; payouts to
-      August scheduled_at; the snapshot fields (approvals,
-      complaints, queries, users) UNCHANGED from the no-filter
-      call (since they have no date filter by design).
-   b. Hand-verify each filtered field via raw SELECT WITH the
-      date range applied.
-   c. State the snapshot fields are unchanged compared to item
-      2's no-filter response.
+3. INDIVIDUAL MARK-READ endpoint:
+   a. Owner 20 picks one unread notification by id. PUT
+      /api/notifications/{id}/read. Show raw response.
+   b. Raw SELECT: notification's is_read=true, read_at set to
+      ~NOW. Show.
+   c. Idempotent: PUT again on the same id. Show response — 200
+      with current state, NOT 400. is_read still true, read_at
+      unchanged from item 3b. Show raw SELECT confirming nothing
+      moved.
+   d. Cross-user 404: customer X (has no notifications) tries
+      PUT /api/notifications/<owner-20's-id>/read. Show 404 with
+      no-leak body. Raw SELECT: owner 20's notification
+      unchanged.
+   e. Non-existent id: PUT /api/notifications/9999999/read →
+      404, same body shape. Identical row counts.
 
-4. CROSS-OWNER VERIFICATION (sanity check that admin sees
-   platform-wide, not owner-scoped):
-   - Compare 8B-admin's no-filter bookings_by_status counts to
-     the sum of all owners' 8B-owner counts. If owner 20 has
-     19 CONFIRMED, owner 32 has 1 CONFIRMED, owner X has Y, etc.,
-     the admin total should equal the sum. State the breakdown.
-     (You don't need to call 8B-owner for every owner; just
-     verify against raw SELECT GROUP BY across owners.)
+4. MARK-ALL-READ endpoint:
+   a. Owner 20 currently has some unread notifications remaining
+      (state the count via raw SELECT). PUT
+      /api/notifications/mark-all-read. Show raw response:
+      marked_count = the number that were unread.
+   b. Raw SELECT post: all of owner 20's notifications have
+      is_read=true, read_at set. Show count.
+   c. Idempotent: PUT mark-all-read again. Show response:
+      marked_count=0 (no rows to mark). 200, not 400.
+   d. Cross-user isolation: customer X PUT mark-all-read.
+      marked_count=0 (they have none). Owner 20's notifications
+      unchanged.
 
-5. ROLE-SCOPING:
-   a. Owner calls /api/admin/dashboard → 403.
-   b. Customer → 403.
-   c. Staff → 403.
-   d. Admin → 200 with full response.
+5. PAGING:
+   a. ?page=0&size=5: returns 5 items, total reflects all of
+      caller's notifications. Show.
+   b. ?page=1&size=5: next 5.
 
-6. ZERO-STATE FIELDS:
-   - Snapshot fields (pending_approvals, open_complaints,
-     open_queries, active_users) all have natural floors and
-     are unlikely to be zero on real test data — but state the
-     value of each. If pending_approvals.turfs=0 because Phase 4
-     already approved everything in tests, that's expected.
-     Similarly open_complaints=0 if 7B's complaints all got
-     resolved during testing, that's expected. State the values
-     and explain any zeros.
+6. ROLE-AGNOSTIC ACCESS:
+   - All three endpoints work for CUSTOMER, OWNER, STAFF, ADMIN
+     roles equally. Each role sees ONLY their own user_id's
+     notifications. Test at least: owner returns owner's,
+     customer returns empty, admin returns admin's (if any).
+   - State that the controller is mapped at /api/notifications
+     and is NOT under /api/owner/, /api/admin/, /api/staff/, or
+     /api/customer/ — it's the cross-role pattern.
 
-7. SNAPSHOT INVARIANT — explicitly verify that the four "no date
-   filter" fields don't change between item 2 (no filter) and
-   item 3a (date filter applied). Same numbers.
+7. NO NEW NOTIFICATIONS CREATED: across all of items 2-6, the
+   notifications table size doesn't grow. State the row count
+   before and after the entire test sequence — IDENTICAL. 8C
+   is read-only.
 
-8. §5: zero notifications created. Read endpoint.
+8. §5 invariant preserved: zero customer-facing notifications in
+   the DB throughout. State: SELECT COUNT(*) FROM notifications
+   n JOIN users u ON u.id=n.user_id WHERE u.role='CUSTOMER' →
+   should be 0.
 
-9. RACE-RECOVERY EXCLUSION (carried-forward contract): state
-   explicitly that the dashboard service does NOT touch the
-   payments or refunds tables — so booking_id IS NULL filtering
-   is N/A. Grep the service for "payments" and "refunds" repo
-   references — should be zero.
-
-Do not begin 8C.
+After acceptance, Phase 8 is complete and the backend is complete.
+Do not begin Phase 9.
