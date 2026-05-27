@@ -1,5 +1,36 @@
-import AppRoutes from './routes';
+import { Routes, Route } from 'react-router-dom';
+import { AuthProvider } from './contexts/AuthContext';
+import { RoleGuard } from './components/RoleGuard';
+
+import Landing      from './pages/Landing';
+import Login        from './pages/Login';
+import Register     from './pages/Register';
+import CustomerHome from './pages/CustomerHome';
+import OwnerHome    from './pages/OwnerHome';
+import AdminHome    from './pages/AdminHome';
+import StaffHome    from './pages/StaffHome';
 
 export default function App() {
-  return <AppRoutes />;
+  return (
+    <AuthProvider>
+      <Routes>
+        <Route path="/"         element={<Landing />} />
+        <Route path="/login"    element={<Login />} />
+        <Route path="/register" element={<Register />} />
+
+        <Route path="/customer/*" element={
+          <RoleGuard role="CUSTOMER"><CustomerHome /></RoleGuard>
+        } />
+        <Route path="/owner/*" element={
+          <RoleGuard role="OWNER"><OwnerHome /></RoleGuard>
+        } />
+        <Route path="/admin/*" element={
+          <RoleGuard role="ADMIN"><AdminHome /></RoleGuard>
+        } />
+        <Route path="/staff/*" element={
+          <RoleGuard role="STAFF"><StaffHome /></RoleGuard>
+        } />
+      </Routes>
+    </AuthProvider>
+  );
 }

@@ -1,203 +1,233 @@
-PHASE 8C of 3 — Notifications list endpoints. Phase 8 ends here,
-and the backend is complete.
+PHASE 9-foundation of ~7 — Frontend architecture setup. Phase 9
+begins. No feature pages yet beyond a basic landing.
 
-Standing rules apply. Stop and report. After acceptance, Phase 8 is
-complete and the backend is done. Reuse Phase 0 error shape, Phase 2
-security UNCHANGED. No 422. 404-not-403 for not-yours. Real executed
-verification — raw DB SELECT, no traced values.
+Standing rules apply (the build-wide rules from DECISIONS.md etc.
+apply to backend integration only; frontend has its own concerns).
+Stop and report at the end. Do NOT start 9-customer-auth-and-browse.
 
-SCOPE: three notification read/update endpoints accessible by ALL
-authenticated user roles. The endpoints scope by caller's user_id —
-each user only ever sees their own notifications.
+SCOPE: set up the frontend foundation under ./frontend so all later
+sub-phases can build feature pages against it. Routing skeleton,
+axios client, auth context, error display, role guards, design
+tokens, basic landing. No real feature pages.
 
-=== Endpoints ===
+=== Locked conventions (from build state) ===
+- Frontend stack: Vite + React + React Router + Axios (already
+  scaffolded in Phase 0).
+- Snake_case URL params and snake_case request/response bodies
+  end-to-end. Do NOT use a camelCase transformer. TypeScript types
+  (if using TS) are snake_case to match the wire format. If using
+  JS, just match the wire format directly.
+- Backend base URL: configurable via environment variable
+  (VITE_API_BASE_URL or similar), default http://localhost:8080.
+  State the env var name you used.
+- JWT bearer token stored in localStorage for v1. State explicitly
+  this is acceptable because Phase 2's per-request DB status check
+  invalidates banned/suspended users on the next request regardless
+  of token staleness.
 
-GET /api/notifications
-  Authenticated, any role. Lists the caller's own notifications.
-  Query parameters (all optional):
-    page (default 0)
-    size (default per API_DOC; if unspecified, default 20)
-    is_read (optional: true/false; default omitted = all)
-  Sort: most recent first (created_at DESC). State this explicitly.
-  Response shape per API_DOC. Each item:
-    {
-      "id": <long>,
-      "type": "<NotificationType enum string>",
-      "message": "<string>",
-      "is_read": <bool>,
-      "created_at": "<ISO timestamp>"
-    }
-  Plus paging metadata per API_DOC (total, page, size, etc.).
+=== Project structure ===
+Under ./frontend/src:
+- pages/ (route-targeted components: pages/Landing.jsx, pages/Login.jsx, etc.)
+- components/ (reusable presentational components: components/Button.jsx, components/Input.jsx)
+- hooks/ (custom hooks: hooks/useAuth.js, hooks/useApiError.js)
+- api/ (the axios instance and per-domain wrappers: api/client.js, api/auth.js)
+- contexts/ (React Context providers: contexts/AuthContext.jsx)
+- lib/ (utilities: lib/tokens.js for localStorage helpers)
+- styles/ (design tokens, global CSS)
+- App.jsx (router + provider setup)
+- main.jsx (entry point)
 
-PUT /api/notifications/{id}/read
-  Authenticated, any role. Marks the specified notification as
-  read. Idempotent: PUT-ing an already-read notification returns
-  200 with the current state (NOT 400, NOT a no-op silent
-  response — the response body should consistently show the
-  current state).
-  Authorization: caller must own the notification (user_id matches).
-  Wrong-user → 404 (no-leak, NOT 403).
-  Response:
-    {
-      "id": <id>,
-      "is_read": true,
-      "read_at": "<ISO timestamp of when this read occurred>" or
-                 the original read timestamp if it was already read.
-    }
+State the actual structure you chose and any deviations.
 
-PUT /api/notifications/mark-all-read
-  Authenticated, any role. Bulk-marks all the caller's unread
-  notifications as read.
-  No body. Idempotent: if no unread, returns 200 with count=0.
-  Response:
-    {
-      "marked_count": <integer — number of notifications flipped
-                       from unread to read in this call>
-    }
-  This is a single SQL update for performance:
-    UPDATE notifications SET is_read=1, read_at=NOW()
-    WHERE user_id=:caller AND is_read=0
-  The marked_count is the rowsAffected.
+=== Routing skeleton ===
+Set up React Router routes for the four role-portals. Most are
+stub pages in 9-foundation (just render the page title and "not
+yet built"):
+- /                       → Landing
+- /login                  → Login
+- /register               → Register (customer registration only;
+                            owners register a different way later)
+- /customer/*             → Customer routes (stub for now,
+                            requires CUSTOMER role)
+- /owner/*                → Owner routes (stub, requires OWNER)
+- /admin/*                → Admin routes (stub, requires ADMIN)
+- /staff/*                → Staff routes (stub, requires STAFF)
 
-=== Schema notes ===
-- The notifications table has user_id (FK), type (enum), message,
-  is_read (boolean default false), created_at, and per the schema
-  may or may not have read_at. State what columns exist via
-  DESCRIBE notifications.
-- If read_at doesn't exist, add it as a sub-§8 deviation (DATETIME(6)
-  nullable). Same kind of additive timestamp as Phase 7's
-  resolved_at — persistent state-transition timestamp, useful for
-  the response body. State the deviation if added.
-- If read_at already exists, use it. Mark-as-read writes
-  read_at = NOW(); mark-all-read writes the same; unread state has
-  read_at = NULL.
+Use React Router's nested routing pattern. Each role-prefixed
+route group wraps in a RoleGuard component that checks
+authContext.user.role against the required role. If unauthenticated
+→ redirect to /login. If wrong role → redirect to / with an error
+message (or a simple 403 page).
 
-=== Per-user filtering (THE critical invariant) ===
-- EVERY endpoint filters by user_id = caller. No cross-user leak
-  is acceptable.
-- The Phase 2 auth filter provides the caller's id; the service
-  uses it without trust-of-input.
-- GET /api/notifications: WHERE user_id=:caller.
-- PUT /api/notifications/{id}/read: WHERE id=:id AND user_id=:caller
-  (atomic — if rows affected = 0, return 404 because either the
-  notification doesn't exist or doesn't belong to caller, indistinguishable).
-- PUT /api/notifications/mark-all-read: WHERE user_id=:caller AND
-  is_read=0 (rows affected = marked_count).
+=== Axios client (api/client.js) ===
+A single configured axios instance:
+- baseURL from env var.
+- Request interceptor: read JWT from localStorage; if present, add
+  Authorization: Bearer <token> header. Do NOT add the header if no
+  token exists.
+- Response interceptor: pass-through on success. On 401, clear the
+  stored token + auth context and redirect to /login (the user's
+  session is invalid).
+- Other errors (400/403/404/409/500/502): pass through; let the
+  calling code handle the error shape. Standard backend error
+  shape is {error: "..."}.
 
-=== Idempotency on PUT /{id}/read ===
-- Already-read notification PUT → 200 with current state.
-- Never-read notification PUT → 200 with is_read=true, read_at=NOW().
-- Wrong-user notification PUT → 404 (the atomic-UPDATE-by-row-count
-  approach naturally produces this: rows affected = 0 → return 404).
-- Race condition: two callers' simultaneous PUT on the same
-  notification — handled by the atomic UPDATE. Whichever wins
-  first sets read_at; the second's UPDATE affects 0 rows (because
-  is_read=0 no longer matches), and we return 200 with the existing
-  state (re-SELECT the row after the UPDATE). State explicitly
-  how you handled this — straightforward atomic-UPDATE-then-SELECT
-  is fine for v1.
+State the interceptor logic in the report.
 
-=== Carried-forward checkpoints ===
-1. Phase 0 error shape on every error response.
-2. Phase 2 security: per-request DB status check still fires
-   (banned/suspended users can't read notifications even with valid
-   token). Don't break this.
-3. No 422. 404 for not-yours. State this is preserved.
-4. §5: ALL existing notifications come from owner-directed types
-   (BOOKING_CANCELLED, BOOKING_RESCHEDULED, TURF_APPROVED, etc.),
-   staff-directed COMPLAINT_ASSIGNED, and from 8A PAYOUT_RELEASED.
-   ZERO customer-facing types exist in the notifications table.
-   8C reads them but does not create new ones. State explicitly
-   that 8C creates no new notifications and the §5 absence is
-   preserved.
+=== Auth context (contexts/AuthContext.jsx) ===
+A React Context provider that exposes:
+- user: {id, email, role, ...} or null
+- token: string or null
+- login(email, password): calls POST /api/auth/login, stores token
+  + user in state and localStorage, returns success/error.
+- logout(): clears token + user from state and localStorage.
+- register(payload): calls POST /api/auth/register for a CUSTOMER
+  account.
+- isAuthenticated, hasRole(role) convenience functions.
 
-=== Do NOT in 8C ===
-- No new notification types or write endpoints (8C is read-only;
-  notifications are created by Phase 4/5/6/7/8A endpoints).
-- No admin-level "view all notifications" endpoint (out of scope;
-  not in API_DOC).
-- No deletion endpoint (the notifications table is append-only
-  in v1).
-- Do not modify any prior phase code.
-- Do not weaken Phase 2 security.
+On app mount, the provider hydrates user + token from localStorage
+if present. State what your hydration approach is (synchronous on
+mount? async with a loading flag?).
 
-=== VERIFICATION — REAL executed, raw output ===
+=== Error display pattern ===
+Pick ONE of:
+(a) A useApiError hook that returns {error, setError, clearError},
+    used in each page with a shared <ErrorBanner> component.
+(b) A toast/notification system using a library or custom
+    component.
+(c) An ErrorBoundary at the route level.
 
-1. Files modified; the three endpoint paths and key SQL/JPQL.
-   State whether you added read_at as a schema deviation.
+State which you picked and why. (a) is simplest for v1; (b) is most
+user-friendly but more code; (c) is for unexpected errors but
+doesn't help with normal API error display.
 
-2. LIST endpoint behavior — execute as multiple roles:
-   a. Owner 20 (the main test owner across the build): GET
-      /api/notifications without filters. Show the raw response
-      with paging metadata. State the count of returned items
-      and verify against raw SELECT WHERE user_id=20.
-   b. Customer X (from earlier phases — should have ZERO
-      notifications per §5): GET /api/notifications. Response
-      shows empty list, total=0. This is the proof §5 holds
-      from the user-facing side too — customers never have
-      notifications.
-   c. Staff member who got COMPLAINT_ASSIGNED in 7B: GET
-      /api/notifications. Show that they see their
-      COMPLAINT_ASSIGNED rows.
-   d. Filter by is_read=false on owner 20: returns only unread.
-      Show count.
-   e. Filter by is_read=true: returns only read. (Probably empty
-      currently since nothing has been read yet — that's fine.)
-   f. Most-recent-first sort confirmed: the first item's
-      created_at is greater than or equal to the last item's.
+The error display must surface the backend's {error: "..."} shape.
+For validation errors {error: "Validation failed", details: {...}},
+display the details map cleanly (field-by-field if appropriate).
 
-3. INDIVIDUAL MARK-READ endpoint:
-   a. Owner 20 picks one unread notification by id. PUT
-      /api/notifications/{id}/read. Show raw response.
-   b. Raw SELECT: notification's is_read=true, read_at set to
-      ~NOW. Show.
-   c. Idempotent: PUT again on the same id. Show response — 200
-      with current state, NOT 400. is_read still true, read_at
-      unchanged from item 3b. Show raw SELECT confirming nothing
-      moved.
-   d. Cross-user 404: customer X (has no notifications) tries
-      PUT /api/notifications/<owner-20's-id>/read. Show 404 with
-      no-leak body. Raw SELECT: owner 20's notification
-      unchanged.
-   e. Non-existent id: PUT /api/notifications/9999999/read →
-      404, same body shape. Identical row counts.
+=== Role-based route guard ===
+A RoleGuard component:
+- Takes a role prop (CUSTOMER, OWNER, ADMIN, STAFF) or array of
+  allowed roles.
+- Reads auth context.
+- If not authenticated → <Navigate to="/login" replace />.
+- If wrong role → <Navigate to="/" replace />. Show a brief toast
+  or banner explaining the redirect (optional).
+- If correct role → render children.
 
-4. MARK-ALL-READ endpoint:
-   a. Owner 20 currently has some unread notifications remaining
-      (state the count via raw SELECT). PUT
-      /api/notifications/mark-all-read. Show raw response:
-      marked_count = the number that were unread.
-   b. Raw SELECT post: all of owner 20's notifications have
-      is_read=true, read_at set. Show count.
-   c. Idempotent: PUT mark-all-read again. Show response:
-      marked_count=0 (no rows to mark). 200, not 400.
-   d. Cross-user isolation: customer X PUT mark-all-read.
-      marked_count=0 (they have none). Owner 20's notifications
-      unchanged.
+=== Minimal design tokens ===
+A CSS file or styled-components theme defining:
+- Colors: primary, secondary, neutral palette, error red, success
+  green.
+- Typography: font family, base size, heading sizes.
+- Spacing scale: 4px / 8px / 16px / 24px / 32px / 48px.
+- Border radius, shadow.
 
-5. PAGING:
-   a. ?page=0&size=5: returns 5 items, total reflects all of
-      caller's notifications. Show.
-   b. ?page=1&size=5: next 5.
+Doesn't need to look polished — needs to be consistent so feature
+sub-phases use the tokens, not arbitrary values.
 
-6. ROLE-AGNOSTIC ACCESS:
-   - All three endpoints work for CUSTOMER, OWNER, STAFF, ADMIN
-     roles equally. Each role sees ONLY their own user_id's
-     notifications. Test at least: owner returns owner's,
-     customer returns empty, admin returns admin's (if any).
-   - State that the controller is mapped at /api/notifications
-     and is NOT under /api/owner/, /api/admin/, /api/staff/, or
-     /api/customer/ — it's the cross-role pattern.
+State whether you used a CSS Module, plain CSS with variables,
+styled-components, Tailwind, or similar. v1 recommendation: plain
+CSS with CSS variables + minimal global stylesheet. No CSS
+framework dependency.
 
-7. NO NEW NOTIFICATIONS CREATED: across all of items 2-6, the
-   notifications table size doesn't grow. State the row count
-   before and after the entire test sequence — IDENTICAL. 8C
-   is read-only.
+=== Landing page ===
+A minimal landing at /:
+- Header with "BookMyTurf" title.
+- A short value-prop sentence ("Book sports turf slots online").
+- Two CTAs: "Login" → /login, "Register" → /register.
+- Footer with placeholder copyright.
 
-8. §5 invariant preserved: zero customer-facing notifications in
-   the DB throughout. State: SELECT COUNT(*) FROM notifications
-   n JOIN users u ON u.id=n.user_id WHERE u.role='CUSTOMER' →
-   should be 0.
+Renders in the user's browser. That's the verification proof for
+9-foundation — visiting / loads this page without errors.
 
-After acceptance, Phase 8 is complete and the backend is complete.
-Do not begin Phase 9.
+=== Login + Register pages (basic functional, not polished) ===
+- Login page: email + password inputs, submit calls
+  authContext.login(). On success, redirect by role:
+  - CUSTOMER → /customer
+  - OWNER → /owner
+  - ADMIN → /admin
+  - STAFF → /staff
+  On error, display the backend's error message via the chosen
+  error display pattern.
+- Register page: minimum fields for customer registration per
+  the auth endpoint's contract (state which fields). Submit calls
+  authContext.register(). On success, auto-login or redirect to
+  /login with a "registered, please log in" message — state which.
+
+=== Stub role-landing pages ===
+- /customer: "Welcome, {user.email}. Customer pages coming in
+  9-customer-auth-and-browse."
+- /owner: same pattern.
+- /admin: same pattern.
+- /staff: same pattern.
+
+These prove the routing + auth + role guards work without
+implementing actual features.
+
+=== Do NOT in 9-foundation ===
+- No feature pages beyond the role-landing stubs.
+- No turf listing, no booking flow, no dashboard, no notifications.
+- Do not modify the backend. Frontend builds against the existing
+  backend.
+- No real CSS polish — minimal token-driven styling only.
+- Do not add libraries beyond React/React Router/Axios unless
+  essential (state any additions and why).
+
+=== VERIFICATION ===
+
+This is a frontend sub-phase, so verification is by RUNNING the
+app and walking the user flow. Each item below: state the URL
+visited, the action taken, the visible result, AND the network
+call(s) made (URL + method + status from DevTools Network tab).
+
+1. Files created; final project structure under ./frontend/src
+   (the tree). State the env var name for backend URL and your
+   chosen design-token approach.
+
+2. RUN the dev server (npm run dev or vite dev). State the URL
+   and port (probably http://localhost:5173).
+
+3. LANDING — visit /. The Landing page renders. Header + sentence
+   + two CTAs visible. No console errors. State what's on screen.
+
+4. REGISTER — click "Register". Walk through registering a new
+   customer (use a fresh email). On submit:
+   - Network tab shows POST <baseURL>/api/auth/register with
+     snake_case body.
+   - Backend responds 201 (or whatever the register endpoint
+     returns).
+   - Page redirects per your chosen post-register flow.
+   State the network request body, response status, and the
+   visible result.
+
+5. LOGIN — log in with the registered customer. Network tab shows
+   POST /api/auth/login. Response includes JWT + user info. Token
+   is stored in localStorage (verify by opening DevTools >
+   Application > localStorage). Redirected to /customer. The
+   /customer stub page renders with the user's email visible.
+
+6. ROUTE GUARD — manually navigate to /admin in the URL bar.
+   Wrong role for a CUSTOMER user. Should redirect to / (or
+   show 403 page). State observed behavior.
+
+7. AXIOS INTERCEPTOR — make any authenticated API call from the
+   customer stub page (e.g., GET /api/notifications, which is
+   role-agnostic). Network tab shows the Authorization header
+   includes "Bearer <token>". Response is 200 with the empty
+   notifications list (customers have zero per §5).
+
+8. LOGOUT — call the logout function (you can add a logout button
+   on the role-landing stubs). Token cleared from localStorage,
+   auth context cleared, redirected to / or /login. Subsequent
+   navigation to /customer redirects to /login.
+
+9. ERROR DISPLAY — trigger a backend error (e.g., login with wrong
+   password). State that the error message from the backend's
+   {error: "..."} response is visibly displayed to the user.
+
+10. OTHER ROLES — log out, log in as an OWNER (from earlier phase
+    test data). Should land on /owner stub. Log out, log in as
+    ADMIN. Lands on /admin stub. Same for STAFF.
+
+Do not begin 9-customer-auth-and-browse.
