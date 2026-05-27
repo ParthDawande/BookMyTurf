@@ -52,6 +52,10 @@ public interface SubCourtRepository extends JpaRepository<SubCourt, Long> {
     @Query("SELECT COUNT(sc) FROM SubCourt sc WHERE sc.turf.id = :turfId AND sc.status = :status")
     long countByTurfIdAndStatus(@Param("turfId") Long turfId, @Param("status") ListingStatus status);
 
+    // Admin dashboard: current snapshot count of sub-courts awaiting approval.
+    @Query("SELECT COUNT(sc) FROM SubCourt sc WHERE sc.status = 'PENDING'")
+    long countPending();
+
     // APPROVED sub-courts for a single turf (customer/public visibility).
     @Query("SELECT sc FROM SubCourt sc WHERE sc.turf.id = :turfId AND sc.status = 'APPROVED' ORDER BY sc.id ASC")
     List<SubCourt> findApprovedByTurfId(@Param("turfId") Long turfId);

@@ -39,6 +39,10 @@ public interface TurfRepository extends JpaRepository<Turf, Long> {
     @Query("SELECT t FROM Turf t WHERE t.id = :id AND t.status = 'APPROVED' AND t.owner.status = 'ACTIVE'")
     Optional<Turf> findDiscoverableById(@Param("id") Long id);
 
+    // Admin dashboard: current snapshot count of turfs awaiting approval.
+    @Query("SELECT COUNT(t) FROM Turf t WHERE t.status = 'PENDING'")
+    long countPending();
+
     // Cities with APPROVED-turf count for the public /cities endpoint.
     // Returns Object[] rows: [city (String), count (Number)].
     @Query(value = "SELECT t.city, COUNT(t.id) FROM turfs t " +

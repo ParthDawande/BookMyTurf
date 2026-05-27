@@ -1,59 +1,50 @@
-PHASE 8B-owner of 4 (Phase 8: 8A done, 8B-owner, 8B-admin, 8C) —
-Owner dashboard read endpoints.
+PHASE 8B-admin of 4 — Admin dashboard read endpoint.
 
-Standing rules apply. Stop and report. Do NOT start 8B-admin.
-Reuse Phase 0 error shape, Phase 2 security UNCHANGED. No 422.
-404-not-403. Real executed verification — raw DB SELECT comparing
-hand-computed totals against the API response, no traced values.
+Standing rules apply. Stop and report. Do NOT start 8C. Reuse Phase 0
+error shape, Phase 2 security UNCHANGED. No 422. No 404-on-existing
+(admin sees everything). Real executed verification — raw DB SELECT
+comparing hand-computed totals against the API response, no traced
+values.
 
-SCOPE: owner-facing dashboard aggregations. Pure read endpoints,
-no writes. The hard part is SQL precision — getting every
-carried-forward financial filter right.
+SCOPE: admin-facing dashboard aggregations. Platform-wide reads, no
+owner scoping (admin has full visibility). New aggregations beyond
+8B-owner: pending approvals, open complaints/queries, active users by
+role, platform commission revenue.
 
-=== Locked design (from Phase 8 framing) ===
+=== Locked design (from 8B-owner acceptance) ===
+- Date range filter: applies to bookings.booking_date for
+  booking-domain queries, payouts.scheduled_at for payout-domain
+  queries. Same dual-domain rule as 8B-owner — one UI date range,
+  two different SQL columns.
 - Revenue formula: SUM(bookings.total_amount) for CONFIRMED +
-  COMPLETED bookings of this owner's turfs. REFUNDED and CANCELLED
-  excluded. NOT SUM(payments) - SUM(refunds) — see rationale below.
-- Date range filter: applies to bookings.booking_date (IST dates).
-  Convert IST date range to bounds using the Phase 6B/8A pattern.
-  Payouts dashboard items use payouts.scheduled_at (separate
-  filter, already established in 8A).
-- Owner scoping: every aggregation traverses bookings → sub_courts
-  → turfs → owner_id WHERE owner_id = caller.
+  COMPLETED, platform-wide (no WHERE owner_id clause).
+- Platform commission = SUM(bookings.commission_amount) for
+  CONFIRMED + COMPLETED. THIS is what the platform actually earned.
+- All sums use BigDecimal.
+- Tz pattern: booking_date is LocalDate, compared directly; for
+  scheduled_at use the same .atStartOfDay() Asia/Kolkata → Instant
+  bounds pattern from 8A / 8B-owner.
 
-=== Carried-forward financial contracts to apply ===
-1. Race-recovery rows have booking_id IS NULL. NOT applicable to
-   bookings/payouts queries directly (those rows live in payments/
-   refunds, not bookings). State this explicitly in your report.
-2. bookings.total_amount is the source of truth for current state.
-   Use this for revenue, not sum-of-payments.
-3. payment_method is opaque varchar — irrelevant for dashboard
-   aggregations.
-4. Tz pattern (carried from 6B-i, 6C-ii, 6C-iii, 8A): convert IST
-   dates to Instant boundaries via .atStartOfDay() in Asia/Kolkata
-   for from_date and .atTime(LocalTime.MAX) for to_date. Compare
-   against booking_date directly when possible (since booking_date
-   is a date, not a timestamp), or convert booking_date through
-   the same zone.
+=== Endpoint ===
 
-=== Endpoints to build ===
-
-GET /api/owner/dashboard
+GET /api/admin/dashboard
   Query parameters (all optional):
     from_date (IST date, YYYY-MM-DD)
     to_date   (IST date, YYYY-MM-DD)
-    turf_id   (filter to a specific turf this owner owns;
-               wrong-owner → 404)
+    (NO turf_id, NO owner_id — admin is platform-wide. If
+    API_DOC specifies admin-side drill-down filters, follow it
+    and state which.)
   Response (JSON):
     {
-      "total_revenue": <BigDecimal — SUM(total_amount) for
-                       CONFIRMED+COMPLETED in scope>,
-      "total_commission": <BigDecimal — SUM(commission_amount)
-                          for CONFIRMED+COMPLETED in scope; this is
-                          what the platform deducts; owner sees this
-                          for transparency>,
-      "owner_payout_total": <BigDecimal — total_revenue minus
-                            total_commission, the owner's gross>,
+      "total_revenue":      <SUM(bookings.total_amount) for
+                            CONFIRMED+COMPLETED in date scope —
+                            platform-wide gross>,
+      "platform_commission":<SUM(bookings.commission_amount) for
+                            CONFIRMED+COMPLETED — what the platform
+                            earned>,
+      "owners_payout_total":<total_revenue minus
+                             platform_commission — the gross paid
+                             to all owners>,
       "bookings_by_status": {
         "CONFIRMED": <count>,
         "COMPLETED": <count>,
@@ -61,130 +52,181 @@ GET /api/owner/dashboard
         "REFUNDED":  <count>
       },
       "payouts_summary": {
-        "pending_amount": <SUM(amount) WHERE status=PENDING>,
-        "paid_amount":    <SUM(amount) WHERE status=PAID>,
-        "cancelled_amount":<SUM(amount) WHERE status=CANCELLED>
+        "pending_amount":   <SUM WHERE status=PENDING — date
+                            filter on scheduled_at>,
+        "paid_amount":      <SUM WHERE status=PAID>,
+        "cancelled_amount": <SUM WHERE status=CANCELLED>
+      },
+      "pending_approvals": {
+        "turfs":      <count of turfs WHERE status=PENDING>,
+        "sub_courts": <count of sub_courts WHERE status=PENDING>
+      },
+      "open_complaints": <count of complaints WHERE status IN
+                          ('OPEN','IN_PROGRESS')>,
+      "open_queries":    <count of queries WHERE status IN
+                          ('OPEN','IN_PROGRESS')>,
+      "active_users": {
+        "customers": <count of users WHERE role='CUSTOMER' AND
+                     status='ACTIVE'>,
+        "owners":    <count WHERE role='OWNER' AND status='ACTIVE'>,
+        "staff":     <count WHERE role='STAFF' AND status='ACTIVE'>
       },
       "filters": {
         "from_date": "YYYY-MM-DD" or null,
-        "to_date":   "YYYY-MM-DD" or null,
-        "turf_id":   <id> or null
+        "to_date":   "YYYY-MM-DD" or null
       }
     }
 
   Behavior:
-  - bookings_by_status counts: filter by booking_date range if
-    given. All four statuses ALWAYS appear in the response, with
-    0 if no bookings match.
-  - revenue/commission/payout: filter by booking_date range,
-    CONFIRMED+COMPLETED only.
-  - payouts_summary: filter by payouts.scheduled_at range (NOT
-    booking_date — payouts have their own date dimension). Show
-    all three statuses always, zero if no rows.
-  - All sums use BigDecimal (HALF_UP for any rounding that occurs
-    on the SUM, though SUMs of stored DECIMAL(10,2) shouldn't need
-    rounding).
+  - bookings_by_status: filter by booking_date range. All four
+    statuses ALWAYS present, 0 if no rows match.
+  - total_revenue / platform_commission / owners_payout_total:
+    filter by booking_date, CONFIRMED+COMPLETED only.
+  - payouts_summary: filter by scheduled_at (IST→UTC bounds, same
+    as 8B-owner). All three statuses always present.
+  - pending_approvals: NO date filter. Approvals queue is a snapshot
+    of current state, not a historical aggregate. State this
+    explicitly.
+  - open_complaints / open_queries: NO date filter, same rationale —
+    snapshot of current operational queue, not a historical
+    aggregate.
+  - active_users: NO date filter — it's a current-state snapshot.
+    Count users WHERE status='ACTIVE' (the per-request DB status
+    check from Phase 2 already filters out banned/suspended; we
+    count the role-filtered ACTIVE subset).
 
-=== Optional: per-turf breakdown ===
-If API_DOC specifies a per-turf breakdown shape, include it; if
-not, defer to admin dashboard (Phase 8B-admin) — the owner
-dashboard in v1 is the cross-turf summary. State whether you
-included per-turf breakdown.
+=== Why the new fields have no date filter ===
+- Pending approvals, open complaints/queries, active users are
+  CURRENT operational snapshots. An admin asking "what's on my
+  plate right now" doesn't want "things that were pending in
+  May 2026" — they want the current backlog.
+- Bookings/revenue/payouts are HISTORICAL aggregates by their
+  nature, so the date filter makes sense there.
+- State this rule explicitly in the report.
 
-=== Owner scoping (no cross-owner leak) ===
-- The dashboard query joins bookings → sub_courts → turfs and
-  filters WHERE turfs.owner_id = :callerId.
-- If turf_id is specified and that turf is not owned by the caller
-  → 404 (no-leak, same as Phase 3 turf access).
+=== Admin role-scoping ===
+- Admin role only. Other roles (CUSTOMER, OWNER, STAFF) → 403.
+- Phase 2 security routing already enforces this for /api/admin/**.
+- No 404 cases (admin sees everything; nothing to leak).
 
-=== Do NOT in 8B-owner ===
-- No admin dashboard (8B-admin).
-- No notifications list endpoints (8C).
-- Do not modify any Phase 5/6/7/8A code.
-- Do not add new tables or columns (DECISIONS §8 — read
-  aggregations don't need them).
-- No customer-facing notifications (dashboard is a read endpoint,
-  fires nothing).
+=== Carried-forward contracts applied ===
+1. Race-recovery rows (booking_id IS NULL in payments/refunds): the
+   dashboard never queries payments or refunds, so structurally N/A.
+   State explicitly.
+2. bookings.total_amount is the source of truth — DO NOT sum
+   payments minus refunds.
+3. opaque payment_method: irrelevant for dashboard aggregations,
+   never appears.
+4. Tz pattern from 6B/6C/8A/8B-owner: explicit Asia/Kolkata
+   conversion for scheduled_at bounds.
+5. status filters:
+   - Revenue: CONFIRMED + COMPLETED.
+   - Active users: status='ACTIVE'.
+   - Pending approvals: turfs.status='PENDING',
+     sub_courts.status='PENDING'.
+   - Open operational items: complaints.status IN
+     ('OPEN','IN_PROGRESS'), same for queries.
 
-=== VERIFICATION — REAL executed, raw output ===
+=== Active-users count: tiebreaker on the per-request DB status check ===
+The Phase 2 security filter does a per-request DB status check on
+the calling user. The active_users count in 8B-admin is a snapshot
+of stored status; it does NOT re-validate every user's currentness.
+For v1 this is fine — banned users have status='BANNED' or
+'SUSPENDED' written to the DB by Phase 4's admin actions; ACTIVE
+means literally what the column says. State this so future-you
+doesn't worry the count drifts from "real" activity.
 
-1. Files modified; the dashboard service method's full body
-   (or the key SQL/JPQL queries). Quote the booking_date range
-   conversion and the join chain showing owner scoping.
+=== Do NOT in 8B-admin ===
+- No per-owner drill-down breakdown (out of v1 scope; if API_DOC
+  specifies it, follow API_DOC; otherwise skip).
+- No notifications list (8C).
+- Do not modify any prior phase code, including 8B-owner's
+  endpoint or service.
+- No customer-facing notifications (read endpoint, fires nothing).
+- Do not weaken Phase 2 security.
 
-2. HAND-VERIFIED COUNTS — this is the gate. Pick an owner with
-   real test data from earlier phases (likely the same owner 20
-   used across 6B, 6C, 8A). Execute the dashboard call without
-   date filters and show:
-   a. Raw HTTP response (the full JSON).
-   b. RAW SELECT queries against the DB, hand-executed:
-      - SELECT status, COUNT(*) FROM bookings WHERE id IN
-        (SELECT b.id FROM bookings b JOIN sub_courts sc ON
-        b.sub_court_id=sc.id JOIN turfs t ON sc.turf_id=t.id
-        WHERE t.owner_id=:ownerId) GROUP BY status;
-        — Compare each count to the response's bookings_by_status.
-      - SELECT SUM(total_amount), SUM(commission_amount) FROM
-        bookings ... (same join) WHERE status IN
+=== VERIFICATION — REAL executed, raw SELECT output ===
+
+1. Files modified; the service method body or key SQL/JPQL
+   queries. Quote the booking_date range conversion (should be
+   trivial — direct LocalDate compare). Quote the scheduled_at
+   bounds conversion (should match 8B-owner's pattern). State
+   the join chain for each aggregation (or "no join, direct
+   table" if standalone).
+
+2. HAND-VERIFIED COUNTS — the substantive gate. Execute the
+   dashboard call without date filters and show:
+   a. Raw HTTP response (full JSON).
+   b. RAW SELECT for EACH field, hand-executed:
+      - bookings_by_status: SELECT status, COUNT(*) FROM bookings
+        GROUP BY status; — should be every booking platform-wide,
+        not just owner 20's.
+      - revenue/commission: SELECT SUM(total_amount),
+        SUM(commission_amount) FROM bookings WHERE status IN
         ('CONFIRMED','COMPLETED');
-        — Compare to total_revenue and total_commission.
-      - SELECT status, SUM(amount) FROM payouts ... WHERE
-        booking_id IN (SELECT b.id FROM bookings...) GROUP BY
-        status;
-        — Compare to payouts_summary.
-   c. State explicitly: "API response total_revenue = <X>; hand-
-      computed via raw SELECT = <Y>; match: yes/no." Same for every
-      other field. If any mismatch, debug and re-run.
+      - payouts_summary: SELECT status, SUM(amount) FROM payouts
+        GROUP BY status;
+      - pending_approvals.turfs: SELECT COUNT(*) FROM turfs WHERE
+        status='PENDING';
+      - pending_approvals.sub_courts: SELECT COUNT(*) FROM
+        sub_courts WHERE status='PENDING';
+      - open_complaints: SELECT COUNT(*) FROM complaints WHERE
+        status IN ('OPEN','IN_PROGRESS');
+      - open_queries: SELECT COUNT(*) FROM queries WHERE status
+        IN ('OPEN','IN_PROGRESS');
+      - active_users: SELECT role, COUNT(*) FROM users WHERE
+        status='ACTIVE' GROUP BY role;
+   c. For EACH field: state explicitly "API says X; DB says Y;
+      match: yes/no." If any mismatch, debug and re-run.
+   d. Sanity arithmetic: total_revenue − platform_commission
+      should equal owners_payout_total exactly. Confirm.
 
-3. DATE RANGE filter — verify the IST boundary case:
-   a. Pick a date range with a known boundary case (e.g., a booking
-      on IST 2026-08-31 with booking_date='2026-08-31'). Call
-      ?from_date=2026-08-01&to_date=2026-08-31. The August booking
-      should be IN the response counts. Hand-verify against
-      WHERE booking_date BETWEEN '2026-08-01' AND '2026-08-31'.
-   b. Call ?from_date=2026-09-01&to_date=2026-09-30. The August
-      booking should NOT be counted.
-   c. Show both responses and hand-verify the boundary.
+3. DATE RANGE filter:
+   a. ?from_date=2026-08-01&to_date=2026-08-31 — show response.
+      Bookings filtered to August booking_dates; payouts to
+      August scheduled_at; the snapshot fields (approvals,
+      complaints, queries, users) UNCHANGED from the no-filter
+      call (since they have no date filter by design).
+   b. Hand-verify each filtered field via raw SELECT WITH the
+      date range applied.
+   c. State the snapshot fields are unchanged compared to item
+      2's no-filter response.
 
-4. TURF FILTER:
-   a. Owner has multiple turfs. Call ?turf_id=<one of theirs>.
-      Response numbers should reflect only that turf.
-   b. Owner calls ?turf_id=<owned by a different owner> → 404
-      no-leak.
+4. CROSS-OWNER VERIFICATION (sanity check that admin sees
+   platform-wide, not owner-scoped):
+   - Compare 8B-admin's no-filter bookings_by_status counts to
+     the sum of all owners' 8B-owner counts. If owner 20 has
+     19 CONFIRMED, owner 32 has 1 CONFIRMED, owner X has Y, etc.,
+     the admin total should equal the sum. State the breakdown.
+     (You don't need to call 8B-owner for every owner; just
+     verify against raw SELECT GROUP BY across owners.)
 
-5. OWNER SCOPING:
-   a. Different owner (owner B) calls /api/owner/dashboard. Their
-      numbers should reflect ONLY their data, not owner A's.
-   b. Customer or staff calls /api/owner/dashboard → 403.
+5. ROLE-SCOPING:
+   a. Owner calls /api/admin/dashboard → 403.
+   b. Customer → 403.
+   c. Staff → 403.
+   d. Admin → 200 with full response.
 
-6. PAYOUTS DATE FILTER independence:
-   - The payouts_summary should respect from_date/to_date if those
-     filter on scheduled_at semantics. State whether your
-     implementation uses the same from_date/to_date for both
-     bookings and payouts (probably reasonable since the customer
-     gave one date range) OR uses booking_date for bookings and
-     scheduled_at for payouts (more accurate).
-   - State explicitly your choice. Both are defensible.
+6. ZERO-STATE FIELDS:
+   - Snapshot fields (pending_approvals, open_complaints,
+     open_queries, active_users) all have natural floors and
+     are unlikely to be zero on real test data — but state the
+     value of each. If pending_approvals.turfs=0 because Phase 4
+     already approved everything in tests, that's expected.
+     Similarly open_complaints=0 if 7B's complaints all got
+     resolved during testing, that's expected. State the values
+     and explain any zeros.
 
-7. ZERO-STATE BEHAVIOR: pick or stage an owner with no bookings.
-   The dashboard should return:
-   - bookings_by_status: all four statuses = 0 (the dict is fully
-     present, not an empty object).
-   - revenue/commission/payout: all 0 (not null).
-   - payouts_summary: all three statuses = 0.
-   Show the raw response.
+7. SNAPSHOT INVARIANT — explicitly verify that the four "no date
+   filter" fields don't change between item 2 (no filter) and
+   item 3a (date filter applied). Same numbers.
 
-8. RACE-RECOVERY EXCLUSION (carried-forward contract 1):
-   State explicitly: payouts query filters by booking_id (joining
-   through bookings → turfs → owner). Race-recovery payments and
-   refunds rows live in the payments/refunds tables with
-   booking_id IS NULL, but the dashboard's payouts_summary queries
-   the payouts table — which always has booking_id NOT NULL by
-   construction (every payout is for a specific booking, no
-   race-recovery payouts exist). So the IS NULL filter is N/A for
-   this endpoint. Confirm this in code: show that no SQL in the
-   dashboard service touches payments or refunds tables directly.
+8. §5: zero notifications created. Read endpoint.
 
-9. §5: zero notifications created by dashboard calls. The endpoint
-   is read-only by contract.
+9. RACE-RECOVERY EXCLUSION (carried-forward contract): state
+   explicitly that the dashboard service does NOT touch the
+   payments or refunds tables — so booking_id IS NULL filtering
+   is N/A. Grep the service for "payments" and "refunds" repo
+   references — should be zero.
 
-Do not begin 8B-admin.
+Do not begin 8C.

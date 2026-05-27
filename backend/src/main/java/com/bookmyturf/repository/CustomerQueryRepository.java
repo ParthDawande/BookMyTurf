@@ -29,6 +29,10 @@ public interface CustomerQueryRepository extends JpaRepository<CustomerQuery, Lo
     @Query("SELECT q FROM CustomerQuery q WHERE q.pickedUpByStaff.id = :staffId ORDER BY q.createdAt DESC")
     List<CustomerQuery> findByPickedUpByStaffId(@Param("staffId") Long staffId);
 
+    // Admin dashboard: count of queries in the active operational queue (snapshot, no date filter).
+    @Query("SELECT COUNT(q) FROM CustomerQuery q WHERE q.status IN :statuses")
+    long countByStatusIn(@Param("statuses") List<SupportTicketStatus> statuses);
+
     // Atomic claim: UPDATE ... WHERE id = :id AND status = OPEN.
     // Returns 1 if this transaction won the race; 0 if the row was already claimed.
     @Modifying(clearAutomatically = true)

@@ -23,4 +23,8 @@ public interface ComplaintRepository extends JpaRepository<Complaint, Long> {
 
     @Query("SELECT c FROM Complaint c WHERE c.assignedStaff.id = :staffId ORDER BY c.createdAt DESC")
     List<Complaint> findByAssignedStaffId(@Param("staffId") Long staffId);
+
+    // Admin dashboard: count of complaints in the active operational queue (snapshot, no date filter).
+    @Query("SELECT COUNT(c) FROM Complaint c WHERE c.status IN :statuses")
+    long countByStatusIn(@Param("statuses") List<SupportTicketStatus> statuses);
 }

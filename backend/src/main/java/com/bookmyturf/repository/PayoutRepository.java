@@ -53,4 +53,12 @@ public interface PayoutRepository extends JpaRepository<Payout, Long> {
     List<Object[]> payoutSummaryByOwner(@Param("ownerId") Long ownerId,
                                          @Param("from") LocalDateTime from,
                                          @Param("to") LocalDateTime to);
+
+    // Admin dashboard: platform-wide payout summary (no owner scoping).
+    @Query("SELECT p.status, COALESCE(SUM(p.amount), 0) FROM Payout p " +
+           "WHERE (:from IS NULL OR p.scheduledAt >= :from) " +
+           "AND (:to IS NULL OR p.scheduledAt <= :to) " +
+           "GROUP BY p.status")
+    List<Object[]> payoutSummaryPlatformWide(@Param("from") LocalDateTime from,
+                                              @Param("to") LocalDateTime to);
 }

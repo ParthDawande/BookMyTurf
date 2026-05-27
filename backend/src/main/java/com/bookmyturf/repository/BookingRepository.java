@@ -60,4 +60,21 @@ public interface BookingRepository extends JpaRepository<Booking, Long> {
                                    @Param("turfId") Long turfId,
                                    @Param("fromDate") LocalDate fromDate,
                                    @Param("toDate") LocalDate toDate);
+
+    // Admin dashboard: platform-wide aggregations (no owner scoping).
+
+    @Query("SELECT b.status, COUNT(b) FROM Booking b " +
+           "WHERE (:fromDate IS NULL OR b.bookingDate >= :fromDate) " +
+           "AND (:toDate IS NULL OR b.bookingDate <= :toDate) " +
+           "GROUP BY b.status")
+    List<Object[]> countByStatusPlatformWide(@Param("fromDate") LocalDate fromDate,
+                                              @Param("toDate") LocalDate toDate);
+
+    @Query("SELECT COALESCE(SUM(b.totalAmount), 0), COALESCE(SUM(b.commissionAmount), 0) FROM Booking b " +
+           "WHERE b.status IN :statuses " +
+           "AND (:fromDate IS NULL OR b.bookingDate >= :fromDate) " +
+           "AND (:toDate IS NULL OR b.bookingDate <= :toDate)")
+    List<Object[]> revenuePlatformWide(@Param("statuses") List<BookingStatus> statuses,
+                                        @Param("fromDate") LocalDate fromDate,
+                                        @Param("toDate") LocalDate toDate);
 }
