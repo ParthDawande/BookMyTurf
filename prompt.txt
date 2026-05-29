@@ -1,327 +1,223 @@
-PHASE 9-owner-turf-management — Turf CRUD + sub-court CRUD + photos
-for the owner portal.
+PHASE 9-admin-foundation-and-dashboard — AdminNav + admin dashboard
+at /admin/dashboard. Smaller of the two admin sub-phases; the
+operations sub-phase follows.
 
 Standing rules apply. Stop and report. Do NOT start
-9-owner-finance-and-engagement. Reuse Phase 0 error shape, Phase 2
-security UNCHANGED. The backend is frozen — build against existing
-endpoints. No new dependencies unless essential.
+9-admin-operations. Reuse Phase 0 error shape, Phase 2 security
+UNCHANGED. The backend is frozen — build against existing
+endpoints. No new dependencies.
 
-SCOPE: the owner manages their turfs and sub-courts. Largest single
-sub-phase of 9-owner because of the breadth of CRUD operations.
-Five features land here:
-- Turf list (/owner/turfs) — filterable by status.
-- Create turf — form, submit → PENDING.
-- Turf detail with edit (/owner/turfs/:id) — sub-courts inline.
-- Sub-court CRUD inline on the turf detail page.
-- Photos: upload/delete on both turfs and sub-courts.
+SCOPE: two things in this sub-phase.
+- AdminNav component (Dashboard / Approvals / Users / Staff /
+  Complaints / Queries / Notifications).
+- Admin dashboard at /admin/dashboard wired to the 8B-admin
+  endpoint.
 
-=== Locked design decisions ===
-- Q1 (c): turf list filterable by status, default "all". Same shape
-  as the customer's bookings list. PENDING/APPROVED/REJECTED/SUSPENDED
-  (the exact set depends on the Phase 4 enum — state which statuses
-  apply).
-- Q2 (a): sub-courts are an inline section on the turf detail page,
-  not a separate /sub-courts route.
-- Q3 (edit immutability): verify via curl which fields are mutable
-  on PENDING vs APPROVED turfs. Phase 3 had rules. State your
-  observations.
+Same shape as 9-owner-foundation-and-dashboard. Reuses the
+NotificationsPage component with the Nav prop (now AdminNav). The
+/admin stub from 9-foundation becomes a redirect to
+/admin/dashboard.
 
 === Backend endpoints used (existing, do not modify) ===
-Verify each shape via curl before building UI. State the actual shapes.
+- GET /api/admin/dashboard?from_date=&to_date= (8B-admin endpoint
+  with platform-wide aggregations, snapshot fields, dual-domain
+  date filter per the 8B-admin contract).
+- GET /api/notifications (8C, role-agnostic, already wired in
+  9-customer-other's NotificationsPage).
 
-Turf:
-- GET /api/owner/turfs (list owner's turfs, may take ?status= filter)
-- POST /api/owner/turfs (create turf, → PENDING)
-- GET /api/owner/turfs/{id} (detail)
-- PUT /api/owner/turfs/{id} (edit, mutability rules per Phase 3)
-- DELETE /api/owner/turfs/{id} (if it exists — state whether)
+Verify the admin dashboard response shape via curl before
+building. The 8B-admin contract returned 17 fields when we
+verified it; confirm they're all still there:
+- total_revenue, platform_commission, owners_payout_total
+- bookings_by_status (CONFIRMED/COMPLETED/CANCELLED/REFUNDED)
+- payouts_summary (PENDING/PAID/CANCELLED)
+- pending_approvals.turfs, pending_approvals.sub_courts
+- open_complaints, open_queries
+- active_users.customers, active_users.owners, active_users.staff
+- filters echo
 
-Sub-courts (nested under turf or top-level — verify):
-- GET sub-courts for a turf
-- POST create sub-court (→ PENDING)
-- PUT edit sub-court
-- DELETE sub-court
+=== Locked design decisions ===
+- Q2 (carried from 9-owner): admin lands at /admin/dashboard
+  post-login. The /admin stub from 9-foundation becomes a
+  redirect to /admin/dashboard.
+- KPI-card dashboard layout (no charting library). Same shape
+  as owner dashboard with two extra row groups for the snapshot
+  fields specific to admin (pending approvals, open
+  complaints/queries, active users).
 
-Photos:
-- POST upload photo (state the upload mechanism: multipart form data?
-  presigned URL? raw bytes? Phase 3 wired this but the protocol
-  wasn't deeply verified in this conversation. Discover via curl
-  AND by inspecting the controller. State what you found.)
-- DELETE photo (state path).
+=== AdminNav component ===
 
-=== /owner/turfs — turf list page ===
+Horizontal sub-nav below the existing Header. Items:
+- Dashboard → /admin/dashboard (active in this sub-phase).
+- Approvals → /admin/approvals (stub, "Coming in 9-admin-
+  operations").
+- Users → /admin/users (stub).
+- Staff → /admin/staff (stub).
+- Complaints → /admin/complaints (stub).
+- Queries → /admin/queries (stub).
+- Notifications → /admin/notifications (uses reusable
+  NotificationsPage with AdminNav prop).
 
-Layout:
-- Header + OwnerNav. "My Turfs" nav item now active.
-- Page title: "My Turfs."
-- Status filter pills/dropdown: All / Pending / Approved / Rejected
-  / (whatever statuses exist). Default "All".
-- "+ Add a turf" CTA (prominent) → /owner/turfs/new.
-- Turf grid or list: card per turf with:
-  - Cover photo (or SVG placeholder if null — reuse the
-    null-safe-cover pattern from 9-customer-auth-and-browse).
-  - Turf name, city.
-  - Status badge (color-coded per status).
-  - Sub-court count.
-  - "Edit" CTA → /owner/turfs/{id}.
-- Status badges with the same visual treatment as customer bookings'
-  status badges (use the design tokens for consistency).
-- Empty state: "You haven't added any turfs yet. + Add your first
-  turf."
+The Nav prop pattern established in 9-customer-other and used
+correctly in 9-owner-foundation-and-dashboard applies here:
+NotificationsPage accepts <NavigationComponent /> as a prop;
+admin mounts it with AdminNav.
 
-URL semantics:
-- /owner/turfs?status=PENDING — bookmarkable.
-- Status="All" doesn't include the param.
-
-=== /owner/turfs/new — create turf form ===
-
-Form fields per the backend's CreateTurfRequest DTO (verify via
-curl). Likely:
-- Name (required)
-- City (required)
-- Address (required)
-- Description (optional)
-- Sports list (one or more — likely multi-select)
-- Operating hours (per Phase 3 — if applicable)
-- Any other fields the DTO has — list whatever the backend exposes.
-  Do NOT invent fields.
-
-Submit → POST. On 201 → navigate to /owner/turfs/{newId} with
-a banner: "Turf created. It will be reviewed by an admin and
-visible to customers once approved."
-
-The new turf starts with status=PENDING, no photos, no sub-courts.
-
-=== /owner/turfs/:id — turf detail with edit + sub-court management ===
+=== /admin/dashboard page ===
 
 Layout:
-- Header + OwnerNav.
-- Breadcrumb back to /owner/turfs.
-- Turf header section:
-  - Cover photo (if present) or placeholder + "Upload cover photo"
-    button.
-  - Status badge.
-  - Editable fields per Q3's mutability rules:
-    - If PENDING: name, address, description, etc. — all editable.
-    - If APPROVED: state which fields can still be edited (likely
-      description, hours, etc. — NOT name/city/address). The fields
-      that ARE mutable get edit-pencil affordances; the ones that
-      AREN'T mutable are displayed as read-only with a small "this
-      cannot be edited after approval" tooltip.
-    - If REJECTED: state behavior. Likely fully editable (resubmit).
-    - State your rule discovery.
-  - Save changes button → PUT /api/owner/turfs/{id}.
+- Header + AdminNav with Dashboard active.
+- Page title: "Admin Dashboard."
+- Date range filter at the top: from_date / to_date snake_case
+  URL params. Same shape as owner dashboard.
 
-- Photos section:
-  - Existing photos rendered as a gallery.
-  - "Upload photo" button → file input → POST upload endpoint.
-    State the upload mechanism (multipart? base64? presigned URL?
-    use whatever Phase 3 wired).
-  - Each photo has a delete button → DELETE endpoint with
-    confirmation modal.
-  - The first photo (lowest id) is the cover photo per the 6A
-    carried-forward rule — state if there's a way for the owner
-    to designate a different cover (probably out of scope for v1
-    — first-by-id is the rule).
+Main content — three sections:
 
-- Sub-courts section:
-  - List of existing sub-courts, each as a card:
-    - Sub-court name, sport, hourly rate, operating hours, status
-      badge, sub-court photos thumbnail row.
-    - "Edit" button → opens inline edit modal OR navigates to a
-      sub-court detail (state your approach).
-    - "Manage photos" → opens a photos modal for that sub-court.
-    - "Delete" button → confirmation modal → DELETE.
-  - "+ Add a sub-court" CTA at the bottom of the list.
-  - Add and edit modals share the same form per the
-    CreateSubCourtRequest / UpdateSubCourtRequest DTOs. Verify
-    DTOs via curl.
+SECTION 1: Financial overview (KPI cards, 3-column on desktop):
+- Total Revenue: ₹X (large).
+- Platform Commission: ₹X (the platform's earned commission —
+  what the business itself earned, not the gross).
+- Owners' Total Payout: ₹X.
 
-States:
-- Loading: skeleton for the turf info, sub-court grid, photo
-  gallery.
-- Error: existing ErrorBanner.
-- Editing in progress: optimistic UI is NOT applied; wait for the
-  PUT response before showing "Saved" feedback. P5 page-state-as-
-  confirmation carries: a small inline "Saved" indicator that
-  fades, or the page just reflects the new values without a toast.
-- 404: "Turf not found" (cross-owner attempt → 404, no-leak per
-  Phase 3).
+SECTION 2: Operational snapshot (NOT subject to date filter):
+A clearly labeled "Current State" section with a small note:
+"These reflect the current operational state, not the date range."
 
-=== Photos upload mechanism ===
+Two rows of cards:
 
-The upload protocol wasn't extensively verified in earlier phases
-of this conversation. Investigate before building:
-1. Check the controller signature for the upload endpoint.
-   Multipart-form-data (Spring's MultipartFile parameter)? JSON
-   with base64-encoded image? Presigned URL pattern?
-2. Verify with a curl test before building the UI.
-3. State the protocol explicitly.
-4. Build the UI to match: an <input type="file"> for multipart;
-   FileReader + base64 for JSON; etc.
+Row 2a — Pending approvals:
+- Turfs awaiting approval: N (clickable → /admin/approvals,
+  stub for now).
+- Sub-courts awaiting approval: N (clickable → /admin/approvals).
 
-If the protocol requires significant new client code (e.g., chunked
-uploads, presigned URLs with separate finalize calls), note the
-complexity and propose: implement the simple cases first, defer
-edge cases (very large files, multiple simultaneous uploads) to
-v2 polish.
+Row 2b — Open tickets:
+- Open complaints: N (clickable → /admin/complaints, stub).
+- Open queries: N (clickable → /admin/queries, stub).
 
-Image rendering:
-- After upload, the response should include a URL or id that the
-  frontend uses to render the new photo. State the response shape.
-- If the backend serves photo bytes directly (e.g., /api/photos/{id})
-  vs. returning an external URL (e.g., S3): the rendering approach
-  differs. State which.
+Row 2c — Active users:
+- Customers: N
+- Owners: N
+- Staff: N
 
-=== Edit immutability (Q3) ===
+SECTION 3: Booking + payout state (subject to date filter,
+same as owner dashboard):
 
-For PENDING turfs: presumably all fields mutable.
-For APPROVED turfs: per Phase 3 contracts (which we wrote in this
-conversation but haven't recently re-read), some fields locked.
-Likely-immutable: turf_name, city, address (because they affect
-customer search and approval evaluation).
-Likely-mutable: description, operating hours, additional photos.
+Row 3a — Bookings by status:
+CONFIRMED / COMPLETED / CANCELLED / REFUNDED (4 mini-cards,
+color-coded per status).
 
-Verify via curl: PUT an APPROVED turf with a name change. Does the
-backend accept it (return 200 with the new name) or reject (return
-400 / ignore the field)? Report what you observe and build the UI
-accordingly. The UI should disable the immutable fields with
-explanation text.
+Row 3b — Payouts summary:
+Pending / Paid / Cancelled (3 mini-cards, color-coded).
+
+States: loading skeleton, error banner, empty (all zeros render
+cleanly — admin starting from scratch wouldn't have meaningful
+data, but verify it renders).
+
+URL semantics: /admin/dashboard?from_date=&to_date= snake_case,
+bookmarkable, refresh-preservable.
 
 === Carried-forward contracts ===
 
-1. P5: page-state-update IS the confirmation. After save: page
-   shows new state, no toast on top. Same for create/delete.
-2. cover_photo_url null-safe rendering on the turf list and detail
-   header (from 9-customer-auth-and-browse).
-3. Status badges color-coded per status using the design tokens
-   (consistent with customer-side status badges).
-4. 404-not-403 no-leak on cross-owner attempts. Phase 3's
-   structural rule carries through to the owner UI: owner A
-   cannot fetch owner B's turf details — backend returns 404,
-   frontend renders "Turf not found."
-5. Snake_case throughout.
+1. The 8B-admin contract: snapshot fields (pending_approvals,
+   open_complaints, open_queries, active_users) have NO date
+   filter applied. Display them with a small label explaining
+   why ("current state, not date-filtered"). The dual-domain
+   rule from 8B-owner applies here too: bookings filtered by
+   booking_date, payouts by scheduled_at.
+2. Snake_case throughout.
+3. Phase 2 routing: customer/owner/staff can't reach
+   /admin/dashboard → redirect to / per RoleGuard.
+4. The parallel-fetch pattern from 9-owner-finance-and-engagement
+   (dashboard + profile in parallel on mount) MAY apply here if
+   admin has an analogous "profile" need. For v1 we just fetch
+   the dashboard; admin doesn't have the bank-details kind of
+   completion check that owners do.
 
 === Do NOT in this sub-phase ===
-- No payouts list, no reviews-management, no notifications-mount
-  updates (those are 9-owner-finance-and-engagement).
-- No dashboard changes.
-- No customer-side changes.
+- No approval queues (9-admin-operations).
+- No user/staff management.
+- No complaints/queries lists.
 - No backend changes.
-- No new charting/upload libraries beyond what's already present
-  (use native <input type="file"> for uploads, no react-dropzone or
-  similar unless absolutely necessary).
+- No new dependencies (no charting library).
 
 === VERIFICATION via Playwright + dev server ===
 
-Use existing owner credentials (ownera5a@bmt.test) and the freshly-
-registered owner from 9-owner-foundation-and-dashboard. The
-freshly-registered owner has zero turfs, which is the right empty-
-state substrate; ownera5a has multiple existing turfs from earlier
-phases, which is the right populated substrate.
+Use admin@bookmyturf.in / Test@1234 from earlier phases. Test
+data state from 8B-admin acceptance: 28 total bookings across
+2 active owners, 17800 revenue, 1780 commission (this has grown
+since 8B-admin landed — booking 33/34/35 etc were added during
+9-customer-* sub-phases), 3 pending turfs, 4 pending sub-courts
+(approximately — verify against the live numbers).
 
-1. Files created/modified. State the backend endpoint shapes
-   discovered via curl (all CRUD endpoints + photos protocol +
-   edit immutability rules). State whether you added or deferred
-   anything.
+1. Files created/modified. State the admin dashboard response
+   shape verified via curl, side-by-side with what 8B-admin
+   shipped — confirm all 17 fields still present. State whether
+   /admin redirects to /admin/dashboard.
 
-2. TURF LIST — ownera5a (populated):
-   a. /owner/turfs. Network: GET /api/owner/turfs. Show response
-      structure.
-   b. State the count and the status mix of turfs in the response.
-   c. Visible card layout. Status badges with correct colors.
-   d. Filter by status=APPROVED. URL ?status=APPROVED.
-      Refetch fires. Only APPROVED turfs visible.
-   e. Filter by PENDING (if any). Similar.
+2. ADMIN LOGIN:
+   a. Log in as admin. Land on /admin/dashboard (not /admin
+      stub).
+   b. AdminNav visible with Dashboard active.
 
-3. TURF LIST — new owner (empty):
-   a. Log in as the freshly-registered owner from previous
-      sub-phase. /owner/turfs.
-   b. Empty state visible with "+ Add your first turf" CTA.
+3. DASHBOARD — NO FILTER:
+   a. GET /api/admin/dashboard fires. Show response.
+   b. KPI cards render field-by-field with response data.
+      State each card's value side-by-side with the response
+      field (same discipline as 9-owner-foundation-and-dashboard
+      item 4b).
+   c. Section 1: revenue/commission/payout cards.
+   d. Section 2: pending_approvals, open_complaints, open_queries,
+      active_users cards. Each with the "current state" label.
+   e. Section 3: bookings_by_status (4 cards) and
+      payouts_summary (3 cards) with color coding.
 
-4. CREATE TURF:
-   a. As the new owner, click "+ Add a turf" → /owner/turfs/new.
-   b. Form renders with the fields from the DTO. State the
-      fields and any required-field validation.
-   c. Fill all required fields. Submit. Network: POST with
-      snake_case body.
-   d. 201 response. Navigate to /owner/turfs/{newId}.
-   e. "Turf created. It will be reviewed by an admin..." banner
-      visible.
-   f. DB raw SELECT: turf row with owner_id=new owner's id,
-      status=PENDING.
+4. SNAPSHOT INVARIANT — explicitly verify:
+   a. With no date filter: capture values of pending_approvals,
+      open_complaints, open_queries, active_users.
+   b. Apply date filter (?from_date=2026-08-01&to_date=2026-08-31).
+      Network refetches.
+   c. STATE that the snapshot fields are UNCHANGED in the
+      filtered response (the carried-forward 8B-admin rule).
+   d. The financial cards and bookings/payouts DID change.
+      Show the numbers before and after.
 
-5. TURF DETAIL — APPROVED turf (ownera5a's):
-   a. Click one of ownera5a's APPROVED turfs from the list.
-      /owner/turfs/{id}.
-   b. Header shows turf info, status APPROVED, cover photo (or
-      placeholder).
-   c. Editable fields per the immutability rules: list which
-      fields show edit-pencils and which are read-only. State
-      the rule you discovered and applied.
-   d. Photos section with existing photos rendered.
-   e. Sub-courts section with existing sub-courts.
+5. DATE FILTER ROUND-TRIP:
+   - Apply filter. URL updates with snake_case params.
+   - Refresh page. Filter preserved, refetch fires.
+   - Clear filters. URL params removed. Numbers restore.
 
-6. EDIT TURF — APPROVED status:
-   a. Modify a mutable field (e.g., description). Save. Network:
-      PUT. 200 response.
-   b. Page state updates with new value, no toast.
-   c. If you try to modify an immutable field (the UI should
-      prevent this — verify the field is disabled / read-only),
-      state your UI's behavior. Also test the backend boundary:
-      curl PUT with an immutable field change. State whether the
-      backend rejects or silently ignores. Frontend should match.
+6. ADMINNAV navigation:
+   a. Click each nav item:
+      - Dashboard → /admin/dashboard (current).
+      - Approvals → /admin/approvals (stub).
+      - Users → /admin/users (stub).
+      - Staff → /admin/staff (stub).
+      - Complaints → /admin/complaints (stub).
+      - Queries → /admin/queries (stub).
+      - Notifications → /admin/notifications (NotificationsPage
+        with AdminNav).
+   b. State that /admin/notifications shows AdminNav (NOT
+      OwnerNav or CustomerNav).
 
-7. EDIT TURF — PENDING status:
-   a. As the new owner (whose freshly-created turf is PENDING),
-      navigate to that turf's detail. All fields should be
-      editable.
-   b. Modify name. Save. Verify it persisted.
+7. ROLE GUARDS:
+   a. Customer → /admin/dashboard redirects to /.
+   b. Owner → /admin/dashboard redirects to /.
+   c. Staff → /admin/dashboard redirects to /.
+   d. Anonymous → /login.
 
-8. SUB-COURT CRUD inline on turf detail:
-   a. On an APPROVED turf, click "+ Add a sub-court". Modal/
-      inline form opens.
-   b. Fill fields. Submit. Network: POST. Sub-court appears in
-      the list with status=PENDING.
-   c. Edit a sub-court (e.g., change hourly rate). Save.
-      Page reflects new rate.
-   d. Delete a sub-court. Confirmation modal → DELETE.
-      Sub-court removed from the list.
-   e. State the sub-court status for newly-created — likely
-      PENDING and needs admin approval (Phase 4 admin endpoints).
-   f. DB raw SELECT: confirm the lifecycle (insert, update,
-      delete) landed correctly.
+8. CROSS-PORTAL CONSISTENCY:
+   - Verify admin dashboard numbers match what 8B-admin tested
+     (modulo growth from 9-customer-* booking activity).
+   - Specifically: bookings_by_status counts should be the SUM
+     of all owners' counts (admin sees platform-wide), so
+     admin.bookings_by_status.CONFIRMED should equal owner-20-
+     dashboard.bookings_by_status.CONFIRMED + owner-32-
+     dashboard.bookings_by_status.CONFIRMED + any other owner's
+     CONFIRMED count.
+   - Spot-check this with one status. State the math.
 
-9. PHOTOS — turf photos:
-   a. Upload a photo. State the file selected and the protocol
-      (multipart, base64, etc.). Network: POST with the photo
-      content. Show response.
-   b. New photo appears in the gallery.
-   c. Delete a photo. Confirmation modal. DELETE.
-   d. The cover photo (first by id) updates if you delete the
-      lowest-id photo.
+9. NETWORK PAYLOADS: all snake_case throughout.
 
-10. PHOTOS — sub-court photos:
-    a. Same flow as turf photos but on a sub-court.
-    b. Verify sub-court photos render independently from turf
-       photos.
+10. MOBILE: dashboard sections stack vertically on ~375px width.
 
-11. CROSS-OWNER 404:
-    a. Owner B tries to GET /owner/turfs/{id} for a turf owned
-       by owner A. 404. "Turf not found" UI.
-    b. Owner B tries to PUT a sub-court owned by another. 404.
-
-12. STATUS-DEPENDENT actions:
-    a. PENDING turf: list shows the "pending review" indicator.
-       The turf isn't customer-visible (verified at the public
-       turf list — anonymous /turfs doesn't show this turf).
-    b. REJECTED turf (if any exist or stageable): list shows
-       REJECTED badge. Owner can presumably resubmit by editing
-       and saving — verify behavior.
-
-13. NETWORK PAYLOADS: all snake_case throughout.
-
-14. MOBILE: turf list grid collapses, detail page stacks
-    vertically, sub-court cards stack.
-
-Do not begin 9-owner-finance-and-engagement.
+Do not begin 9-admin-operations.

@@ -13,3 +13,16 @@ export const deletePhoto    = (turfId, photoId) => client.delete(`/api/owner/tur
 export const createSubCourt = (turfId, body) => client.post(`/api/owner/turfs/${turfId}/sub-courts`, body);
 export const updateSubCourt = (scId, body)   => client.put(`/api/owner/sub-courts/${scId}`, body);
 export const deleteSubCourt = (scId)         => client.delete(`/api/owner/sub-courts/${scId}`);
+
+// Payouts
+export const listPayouts = (params) => client.get('/api/owner/payouts', { params });
+
+// Reviews + replies
+export const listOwnerReviews = (params)  => client.get('/api/owner/reviews', { params });
+export const postReply        = (id, body) => client.post(`/api/owner/reviews/${id}/reply`, body);
+export const putReply         = (id, body) => client.put(`/api/owner/reviews/${id}/reply`, body);
+export const deleteReply      = (id)       => client.delete(`/api/owner/reviews/${id}/reply`);
+
+// Profile (bank details)
+export const getProfile    = ()     => client.get('/api/owner/profile');
+export const updateProfile = (body) => client.put('/api/owner/profile', body);

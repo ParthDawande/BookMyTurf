@@ -22,11 +22,16 @@ import QueryList       from './pages/QueryList';
 import QueryDetail     from './pages/QueryDetail';
 import NotificationsPage from './pages/NotificationsPage';
 import OwnerDashboard  from './pages/OwnerDashboard';
-import OwnerStub       from './pages/OwnerStub';
 import OwnerNav        from './components/OwnerNav';
 import OwnerTurfList   from './pages/OwnerTurfList';
 import OwnerTurfNew    from './pages/OwnerTurfNew';
 import OwnerTurfDetail from './pages/OwnerTurfDetail';
+import OwnerPayouts    from './pages/OwnerPayouts';
+import OwnerReviews    from './pages/OwnerReviews';
+import OwnerAccount    from './pages/OwnerAccount';
+import AdminDashboard  from './pages/AdminDashboard';
+import AdminStub       from './pages/AdminStub';
+import AdminNav        from './components/AdminNav';
 
 function CG({ children }) {
   return <RoleGuard role="CUSTOMER">{children}</RoleGuard>;
@@ -68,11 +73,21 @@ export default function App() {
         <Route path="/owner/turfs/new"     element={<OG><OwnerTurfNew /></OG>} />
         <Route path="/owner/turfs/:id"    element={<OG><OwnerTurfDetail /></OG>} />
         <Route path="/owner/turfs"        element={<OG><OwnerTurfList /></OG>} />
-        <Route path="/owner/payouts"      element={<OG><OwnerStub title="Payouts" coming="Coming in 9-owner-finance-and-engagement." /></OG>} />
-        <Route path="/owner/reviews"      element={<OG><OwnerStub title="Reviews" coming="Coming in 9-owner-finance-and-engagement." /></OG>} />
-        <Route path="/owner/*"            element={<OG><OwnerDashboard /></OG>} />
+        <Route path="/owner/payouts"       element={<OG><OwnerPayouts /></OG>} />
+        <Route path="/owner/reviews"       element={<OG><OwnerReviews /></OG>} />
+        <Route path="/owner/account"       element={<OG><OwnerAccount /></OG>} />
+        <Route path="/owner/*"             element={<OG><OwnerDashboard /></OG>} />
 
-        <Route path="/admin/*"  element={<RoleGuard role="ADMIN"><AdminHome /></RoleGuard>} />
+        {/* Admin */}
+        <Route path="/admin"               element={<Navigate to="/admin/dashboard" replace />} />
+        <Route path="/admin/dashboard"     element={<RoleGuard role="ADMIN"><AdminDashboard /></RoleGuard>} />
+        <Route path="/admin/notifications" element={<RoleGuard role="ADMIN"><NotificationsPage Nav={AdminNav} /></RoleGuard>} />
+        <Route path="/admin/approvals"     element={<RoleGuard role="ADMIN"><AdminStub title="Approvals" /></RoleGuard>} />
+        <Route path="/admin/users"         element={<RoleGuard role="ADMIN"><AdminStub title="Users" /></RoleGuard>} />
+        <Route path="/admin/staff"         element={<RoleGuard role="ADMIN"><AdminStub title="Staff" /></RoleGuard>} />
+        <Route path="/admin/complaints"    element={<RoleGuard role="ADMIN"><AdminStub title="Complaints" /></RoleGuard>} />
+        <Route path="/admin/queries"       element={<RoleGuard role="ADMIN"><AdminStub title="Queries" /></RoleGuard>} />
+        <Route path="/admin/*"             element={<RoleGuard role="ADMIN"><AdminDashboard /></RoleGuard>} />
         <Route path="/staff/*"  element={<RoleGuard role="STAFF"><StaffHome /></RoleGuard>} />
       </Routes>
     </AuthProvider>

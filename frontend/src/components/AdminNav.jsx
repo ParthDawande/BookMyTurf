@@ -1,15 +1,16 @@
 import { NavLink } from 'react-router-dom';
 
 const links = [
-  { to: '/owner/dashboard',     label: 'Dashboard' },
-  { to: '/owner/turfs',         label: 'My Turfs' },
-  { to: '/owner/payouts',       label: 'Payouts' },
-  { to: '/owner/reviews',       label: 'Reviews' },
-  { to: '/owner/account',       label: 'Account' },
-  { to: '/owner/notifications', label: 'Notifications' },
+  { to: '/admin/dashboard',     label: 'Dashboard' },
+  { to: '/admin/approvals',     label: 'Approvals' },
+  { to: '/admin/users',         label: 'Users' },
+  { to: '/admin/staff',         label: 'Staff' },
+  { to: '/admin/complaints',    label: 'Complaints' },
+  { to: '/admin/queries',       label: 'Queries' },
+  { to: '/admin/notifications', label: 'Notifications' },
 ];
 
-export default function OwnerNav() {
+export default function AdminNav() {
   return (
     <nav style={{
       background: '#fff', borderBottom: '1px solid #e5e7eb',
@@ -22,8 +23,8 @@ export default function OwnerNav() {
           style={({ isActive }) => ({
             display: 'inline-block', padding: '0.65rem 1.1rem',
             fontSize: '0.88rem', fontWeight: isActive ? 600 : 400,
-            color: isActive ? '#1d4ed8' : '#374151',
-            borderBottom: isActive ? '2px solid #1d4ed8' : '2px solid transparent',
+            color: isActive ? '#7c3aed' : '#374151',
+            borderBottom: isActive ? '2px solid #7c3aed' : '2px solid transparent',
             textDecoration: 'none', whiteSpace: 'nowrap',
           })}
         >

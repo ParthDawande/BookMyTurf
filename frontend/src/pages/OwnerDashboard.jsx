@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
-import { useSearchParams, useNavigate } from 'react-router-dom';
+import { useSearchParams, useNavigate, Link } from 'react-router-dom';
 import { getDashboard } from '../api/ownerDashboard';
+import { getProfile } from '../api/ownerTurfs';
 import Header from '../components/Header';
 import OwnerNav from '../components/OwnerNav';
 import { ErrorBanner } from '../components/ErrorBanner';
@@ -65,6 +66,9 @@ export default function OwnerDashboard() {
   const [loading,   setLoading]   = useState(true);
   const [error,     setError]     = useState(null);
 
+  // null = not yet fetched; true/false = resolved
+  const [bankComplete, setBankComplete] = useState(null);
+
   const load = useCallback((from, to) => {
     setLoading(true);
     setError(null);
@@ -78,6 +82,13 @@ export default function OwnerDashboard() {
   }, []);
 
   useEffect(() => { load(fromParam, toParam); }, [load, fromParam, toParam]);
+
+  // One-time profile fetch to check bank_details_complete
+  useEffect(() => {
+    getProfile()
+      .then(res => setBankComplete(res.data.bank_details_complete))
+      .catch(() => {}); // non-critical — silently skip if it fails
+  }, []);
 
   function handleFilterSubmit(e) {
     e.preventDefault();
@@ -103,6 +114,26 @@ export default function OwnerDashboard() {
       <OwnerNav />
 
       <main style={{ maxWidth: '1000px', margin: '0 auto', padding: '1.5rem 1rem' }}>
+        {/* Bank-details incomplete banner */}
+        {bankComplete === false && (
+          <div style={{
+            background: '#fefce8', border: '1px solid #fde68a', borderRadius: '8px',
+            padding: '0.75rem 1.1rem', marginBottom: '1.1rem',
+            display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap',
+          }}>
+            <span style={{ fontSize: '1.1rem' }}>🏦</span>
+            <span style={{ fontSize: '0.88rem', color: '#92400e', flex: 1 }}>
+              Your bank details are incomplete. Add your bank account to receive payouts.
+            </span>
+            <Link to="/owner/account" style={{
+              fontSize: '0.85rem', color: '#92400e', fontWeight: 600,
+              textDecoration: 'underline', whiteSpace: 'nowrap',
+            }}>
+              Complete now →
+            </Link>
+          </div>
+        )}
+
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center',
           marginBottom: '1.25rem', flexWrap: 'wrap', gap: '0.5rem' }}>
           <h1 style={{ margin: 0, color: '#1e3a5f', fontSize: '1.4rem', fontWeight: 700 }}>Dashboard</h1>
