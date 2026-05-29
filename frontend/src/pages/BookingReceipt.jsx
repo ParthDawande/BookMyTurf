@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { getBooking, cancelBooking } from '../api/bookings';
+import { getMyReview, createReview, updateReview, deleteReview } from '../api/reviews';
 import Header from '../components/Header';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -135,24 +136,108 @@ function Row({ label, value, mono }) {
   );
 }
 
+// ── Star rating components ────────────────────────────────────────────────────
+
+function StarDisplay({ rating }) {
+  return (
+    <span>
+      {[1,2,3,4,5].map(n => (
+        <span key={n} style={{ color: n <= rating ? '#f59e0b' : '#d1d5db', fontSize: '1.1rem' }}>★</span>
+      ))}
+    </span>
+  );
+}
+
+function StarSelector({ value, onChange }) {
+  const [hover, setHover] = useState(0);
+  return (
+    <span style={{ display: 'inline-flex', gap: '0.15rem', cursor: 'pointer' }}>
+      {[1,2,3,4,5].map(n => (
+        <span
+          key={n}
+          onClick={() => onChange(n)}
+          onMouseEnter={() => setHover(n)}
+          onMouseLeave={() => setHover(0)}
+          style={{ fontSize: '1.6rem', color: n <= (hover || value) ? '#f59e0b' : '#d1d5db', lineHeight: 1 }}
+        >
+          ★
+        </span>
+      ))}
+    </span>
+  );
+}
+
+// ── Delete review confirmation modal ─────────────────────────────────────────
+
+function DeleteReviewModal({ open, onConfirm, onCancel, deleting }) {
+  if (!open) return null;
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 300 }}
+      onClick={onCancel}>
+      <div style={{ background: '#fff', borderRadius: '10px', padding: '1.75rem',
+        maxWidth: '380px', width: '92%', boxShadow: '0 8px 32px rgba(0,0,0,0.18)' }}
+        onClick={e => e.stopPropagation()}>
+        <h3 style={{ color: '#b91c1c', margin: '0 0 0.6rem', fontSize: '1rem' }}>Delete your review?</h3>
+        <p style={{ color: '#555', fontSize: '0.88rem', margin: '0 0 1.25rem', lineHeight: 1.5 }}>
+          This cannot be undone.
+        </p>
+        <div style={{ display: 'flex', gap: '0.75rem' }}>
+          <button onClick={onConfirm} disabled={deleting} style={{
+            flex: 1, padding: '0.6rem', background: deleting ? '#fca5a5' : '#dc2626',
+            color: '#fff', border: 'none', borderRadius: '5px',
+            cursor: deleting ? 'not-allowed' : 'pointer', fontWeight: 600, fontSize: '0.9rem',
+          }}>
+            {deleting ? 'Deleting…' : 'Delete review'}
+          </button>
+          <button onClick={onCancel} disabled={deleting} style={{
+            padding: '0.6rem 1.1rem', background: 'transparent',
+            border: '1px solid #d1d5db', color: '#374151', borderRadius: '5px',
+            cursor: 'pointer', fontSize: '0.88rem',
+          }}>
+            Keep review
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── BookingReceipt ────────────────────────────────────────────────────────────
 
 export default function BookingReceipt() {
   const { id }    = useParams();
   const navigate  = useNavigate();
 
-  const [booking,      setBooking]      = useState(null);
-  const [loading,      setLoading]      = useState(true);
-  const [error,        setError]        = useState(null);
-  const [showCancel,   setShowCancel]   = useState(false);
-  const [cancelling,   setCancelling]   = useState(false);
-  const [cancelError,  setCancelError]  = useState(null);
+  const [booking,           setBooking]           = useState(null);
+  const [loading,           setLoading]           = useState(true);
+  const [error,             setError]             = useState(null);
+  const [showCancel,        setShowCancel]        = useState(false);
+  const [cancelling,        setCancelling]        = useState(false);
+  const [cancelError,       setCancelError]       = useState(null);
+
+  // Review state
+  const [review,            setReview]            = useState(null);
+  const [reviewFormOpen,    setReviewFormOpen]    = useState(false);
+  const [reviewRating,      setReviewRating]      = useState(5);
+  const [reviewComment,     setReviewComment]     = useState('');
+  const [reviewSubmitting,  setReviewSubmitting]  = useState(false);
+  const [reviewError,       setReviewError]       = useState(null);
+  const [reviewDeleteModal, setReviewDeleteModal] = useState(false);
+  const [reviewDeleting,    setReviewDeleting]    = useState(false);
 
   useEffect(() => {
     setLoading(true);
     setError(null);
     getBooking(id)
-      .then(res => setBooking(res.data))
+      .then(res => {
+        setBooking(res.data);
+        if (res.data.status === 'COMPLETED') {
+          getMyReview(res.data.booking_id)
+            .then(r => setReview(r.data))
+            .catch(() => setReview(null));
+        }
+      })
       .catch(err => {
         const status = err.response?.status;
         setError(status === 404 ? 'Booking not found.' : (err.response?.data?.error || 'Failed to load booking.'));
@@ -186,6 +271,44 @@ export default function BookingReceipt() {
       }
     } finally {
       setCancelling(false);
+    }
+  }
+
+  function openReviewForm(existing) {
+    setReviewRating(existing ? existing.rating : 5);
+    setReviewComment(existing ? (existing.review_text || '') : '');
+    setReviewError(null);
+    setReviewFormOpen(true);
+  }
+
+  async function handleReviewSubmit() {
+    setReviewSubmitting(true);
+    setReviewError(null);
+    try {
+      if (review) {
+        const res = await updateReview(review.review_id, { rating: reviewRating, review_text: reviewComment });
+        setReview(res.data);
+      } else {
+        const res = await createReview({ booking_id: booking.booking_id, rating: reviewRating, review_text: reviewComment });
+        setReview(res.data);
+      }
+      setReviewFormOpen(false);
+    } catch (err) {
+      setReviewError(err.response?.data?.error || 'Failed to save review. Please try again.');
+    } finally {
+      setReviewSubmitting(false);
+    }
+  }
+
+  async function handleReviewDelete() {
+    setReviewDeleting(true);
+    try {
+      await deleteReview(review.review_id);
+      setReview(null);
+      setReviewDeleteModal(false);
+      setReviewFormOpen(false);
+    } catch {
+      setReviewDeleting(false);
     }
   }
 
@@ -326,7 +449,7 @@ export default function BookingReceipt() {
           </Section>
         )}
 
-        {/* Action buttons */}
+        {/* Action buttons — CONFIRMED */}
         {status === 'CONFIRMED' && (
           <Section>
             <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
@@ -345,7 +468,7 @@ export default function BookingReceipt() {
                 Cancel booking
               </button>
               <button
-                onClick={() => alert('Reschedule coming in next sub-phase.')}
+                onClick={() => { if (canAct) navigate(`/customer/bookings/${id}/reschedule`); }}
                 disabled={!canAct}
                 style={{
                   padding: '0.6rem 1.3rem',
@@ -367,18 +490,107 @@ export default function BookingReceipt() {
           </Section>
         )}
 
+        {/* Review section — COMPLETED */}
         {status === 'COMPLETED' && (
-          <Section>
-            <button
-              onClick={() => alert('Reviews coming in next sub-phase.')}
-              style={{
-                padding: '0.6rem 1.3rem', background: '#fff', color: '#2e86de',
-                border: '1px solid #2e86de', borderRadius: '5px', cursor: 'pointer', fontSize: '0.9rem',
-              }}
-            >
-              Leave a review
-            </button>
-          </Section>
+          <>
+            {/* Existing review display */}
+            {review && !reviewFormOpen && (
+              <Section title="Your review">
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.4rem' }}>
+                  <StarDisplay rating={review.rating} />
+                  <span style={{ color: '#6b7280', fontSize: '0.82rem' }}>
+                    {review.created_at ? new Date(review.created_at).toLocaleDateString('en-IN', { dateStyle: 'medium' }) : ''}
+                  </span>
+                </div>
+                {review.review_text && (
+                  <p style={{ color: '#374151', fontSize: '0.9rem', margin: '0 0 0.75rem', lineHeight: 1.5 }}>
+                    {review.review_text}
+                  </p>
+                )}
+                <div style={{ display: 'flex', gap: '0.6rem' }}>
+                  <button onClick={() => openReviewForm(review)} style={{
+                    padding: '0.4rem 1rem', background: '#fff', color: '#2e86de',
+                    border: '1px solid #2e86de', borderRadius: '5px', cursor: 'pointer', fontSize: '0.85rem',
+                  }}>
+                    Edit review
+                  </button>
+                  <button onClick={() => setReviewDeleteModal(true)} style={{
+                    padding: '0.4rem 1rem', background: '#fff', color: '#dc2626',
+                    border: '1px solid #fca5a5', borderRadius: '5px', cursor: 'pointer', fontSize: '0.85rem',
+                  }}>
+                    Delete
+                  </button>
+                </div>
+              </Section>
+            )}
+
+            {/* Review form (inline) */}
+            {reviewFormOpen && (
+              <Section title={review ? 'Edit your review' : 'Leave a review'}>
+                <div style={{ marginBottom: '0.9rem' }}>
+                  <div style={{ fontSize: '0.85rem', color: '#555', marginBottom: '0.4rem' }}>Rating</div>
+                  <StarSelector value={reviewRating} onChange={setReviewRating} />
+                </div>
+                <div style={{ marginBottom: '0.9rem' }}>
+                  <div style={{ fontSize: '0.85rem', color: '#555', marginBottom: '0.4rem' }}>Comment</div>
+                  <textarea
+                    value={reviewComment}
+                    onChange={e => setReviewComment(e.target.value)}
+                    rows={3}
+                    maxLength={1000}
+                    placeholder="Share your experience…"
+                    style={{ width: '100%', padding: '0.5rem 0.7rem', borderRadius: '5px',
+                      border: '1px solid #d1d5db', fontSize: '0.9rem', resize: 'vertical',
+                      fontFamily: 'inherit', boxSizing: 'border-box' }}
+                  />
+                </div>
+                {reviewError && (
+                  <div style={{ background: '#fef2f2', border: '1px solid #fca5a5', color: '#b91c1c',
+                    borderRadius: '5px', padding: '0.55rem 0.8rem', marginBottom: '0.75rem', fontSize: '0.85rem' }}>
+                    {reviewError}
+                  </div>
+                )}
+                <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'center' }}>
+                  <button onClick={handleReviewSubmit} disabled={reviewSubmitting} style={{
+                    padding: '0.55rem 1.2rem', background: reviewSubmitting ? '#93c5fd' : '#1d4ed8',
+                    color: '#fff', border: 'none', borderRadius: '5px',
+                    cursor: reviewSubmitting ? 'not-allowed' : 'pointer', fontWeight: 600, fontSize: '0.9rem',
+                  }}>
+                    {reviewSubmitting ? 'Saving…' : (review ? 'Update review' : 'Submit review')}
+                  </button>
+                  <button onClick={() => { setReviewFormOpen(false); setReviewError(null); }} style={{
+                    background: 'none', border: 'none', color: '#6b7280', cursor: 'pointer', fontSize: '0.88rem',
+                  }}>
+                    Cancel
+                  </button>
+                  {review && (
+                    <button onClick={() => setReviewDeleteModal(true)} style={{
+                      marginLeft: 'auto', background: 'none', border: 'none', color: '#dc2626',
+                      cursor: 'pointer', fontSize: '0.85rem', textDecoration: 'underline',
+                    }}>
+                      Delete review
+                    </button>
+                  )}
+                </div>
+              </Section>
+            )}
+
+            {/* Review CTA (no review yet or after deletion, form closed) */}
+            {!reviewFormOpen && (
+              <Section>
+                <button
+                  onClick={() => openReviewForm(review)}
+                  style={{
+                    padding: '0.6rem 1.3rem', background: '#fff',
+                    color: '#2e86de', border: '1px solid #2e86de',
+                    borderRadius: '5px', cursor: 'pointer', fontSize: '0.9rem',
+                  }}
+                >
+                  {review ? 'View/edit your review' : 'Leave a review'}
+                </button>
+              </Section>
+            )}
+          </>
         )}
       </main>
 
@@ -388,6 +600,13 @@ export default function BookingReceipt() {
         onKeep={() => { setShowCancel(false); setCancelError(null); }}
         cancelling={cancelling}
         cancelError={cancelError}
+      />
+
+      <DeleteReviewModal
+        open={reviewDeleteModal}
+        onConfirm={handleReviewDelete}
+        onCancel={() => { setReviewDeleteModal(false); setReviewDeleting(false); }}
+        deleting={reviewDeleting}
       />
     </div>
   );

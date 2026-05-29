@@ -44,6 +44,21 @@ public class ReviewService {
     }
 
     // -------------------------------------------------------------------------
+    // GET /api/customer/reviews/booking/{bookingId} — customer's own review
+    // -------------------------------------------------------------------------
+
+    public CreateReviewResponse getReviewByBookingId(User customer, Long bookingId) {
+        bookingRepository.findByIdAndCustomerId(bookingId, customer.getId())
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Booking not found"));
+        Review review = reviewRepository.findByBookingId(bookingId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "No review for this booking"));
+        Turf turf = review.getTurf();
+        return new CreateReviewResponse(review.getId(), turf.getId(), turf.getName(),
+                bookingId, review.getRating(), review.getReviewText(),
+                review.getCreatedAt() != null ? review.getCreatedAt().toString() : null);
+    }
+
+    // -------------------------------------------------------------------------
     // POST /api/customer/reviews — create review
     // -------------------------------------------------------------------------
 

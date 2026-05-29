@@ -1,313 +1,332 @@
-PHASE 9-customer-lifecycle-1 — My Bookings list + full Receipt page
-+ Cancel flow.
+PHASE 9-customer-lifecycle-2 — Reschedule flow (all three cases
+including real Razorpay for PAYMENT) + Reviews.
 
-Standing rules apply. Stop and report. Do NOT start
-9-customer-lifecycle-2 (reschedule + reviews). Reuse Phase 0 error
-shape, Phase 2 security UNCHANGED. The backend is frozen — build
-against existing endpoints. No new dependencies.
+Standing rules apply. Stop and report. After acceptance,
+9-customer-lifecycle is complete. Reuse Phase 0 error shape, Phase 2
+security UNCHANGED. The backend is frozen — build against existing
+endpoints. No new dependencies.
 
-SCOPE: three customer-facing features around viewing and cancelling
-their bookings.
-- /customer/bookings — paginated list of customer's own bookings.
-- /customer/bookings/:id — full receipt page (replaces 9-customer-
-  booking's placeholder).
-- Cancel flow — confirmation modal from the receipt, calls DELETE,
-  page reflects new state.
+SCOPE: two customer-facing features.
+- /customer/bookings/:id/reschedule — single-page reschedule flow
+  with the three cases (EQUAL no payment, REFUND auto-issued,
+  PAYMENT real Razorpay charge).
+- Reviews on COMPLETED bookings — leave/edit/delete a review from
+  the receipt page.
 
 === Locked design decisions ===
-- P1: cancel button is ALWAYS VISIBLE on CONFIRMED bookings, but
-  DISABLED with an inline explanation when outside the 24h window.
-  Same approach will apply to reschedule button in lifecycle-2.
-- P5: page state update after cancel IS the customer's confirmation.
-  No customer-facing notification, no toast on top of the page
-  update. The page-state-change is the confirmation.
+- P1 (carried from lifecycle-1): reschedule button on receipt is
+  ENABLED when status=CONFIRMED AND earliest slot >24h in future;
+  DISABLED with inline explanation otherwise.
+- P2: explicit "old vs new" framing on the reschedule page.
+  Customer sees what they currently have alongside what they're
+  proposing.
+- P3: real Razorpay checkout.js modal for the PAYMENT case (the
+  pattern is established from 9-customer-booking — reuse it).
+- P4: review CTA on receipt visible only when status=COMPLETED.
+  If a review exists, the button switches to "View/edit your
+  review" mode.
+- P5: page-state-update IS the confirmation. No toasts. After
+  reschedule confirms, navigate back to the receipt page which
+  shows the new state.
+- (A) single-page reschedule, not stepper. Date picker + new-slot
+  selection + price-difference summary + confirm CTA all visible
+  on one screen.
 
 === Backend endpoints used (existing, do not modify) ===
-- GET /api/customer/bookings (paginated list, snake_case query
-  params per build convention: ?page=&size=&status=).
-- GET /api/customer/bookings/{id} (full receipt — uses the 6A
-  receipt-fix shape with payments PLURAL array, refunds array).
-- DELETE /api/customer/bookings/{id} (cancel-with-refund per 6B).
+- POST /api/customer/bookings/{id}/reschedule/initiate — body:
+  new booking_date and new slots (state the exact shape via curl
+  before building UI around it). Response: action_required (NONE/
+  REFUND/PAYMENT), price_diff, refund_amount or razorpay order
+  details depending on case, reschedule_token (15-min JWT).
+- PUT /api/customer/bookings/{id}/reschedule/confirm — body: the
+  reschedule_token; for PAYMENT case also the three Razorpay
+  values. Response: updated booking detail.
+- POST /api/customer/reviews — body: booking_id, rating, comment.
+- PUT /api/customer/reviews/{id} — body: rating, comment.
+- DELETE /api/customer/reviews/{id}.
 
-State the exact response shapes you observe from each (the
-fields you depend on), since this informs the frontend's rendering.
+Verify shapes via curl before building the UI; state what you
+observed.
 
-=== Page 1: My Bookings list (/customer/bookings) ===
+=== Reschedule page (/customer/bookings/:id/reschedule) ===
 
-Layout:
-- Header (existing Header.jsx with user email + logout).
-- Page title: "My Bookings."
-- Status filter: dropdown with options "All", "CONFIRMED",
-  "COMPLETED", "CANCELLED", "REFUNDED". Default "All".
-  Filter changes the ?status= URL param and refetches.
-- Booking list: card per booking with:
-  - Turf name (clickable → /turfs/{turf_id} for detail).
-  - Sub-court name + sport.
-  - Booking date (human-readable: "Saturday, June 27, 2026").
-  - Slot time range (first slot start → last slot end:
-    "9:00 AM – 11:00 AM").
-  - Status badge with visual treatment per status (color-coded:
-    CONFIRMED green, COMPLETED neutral, CANCELLED grey-strike,
-    REFUNDED amber/red — use the design tokens).
-  - Total amount.
-  - "View details" CTA → /customer/bookings/{id}.
-- Pagination controls at the bottom.
-- "Book another" CTA somewhere visible → /turfs.
+Single-page layout:
 
-States:
-- Loading: simple "Loading..." or spinner using the existing pattern.
-- Empty (no bookings): "You haven't made any bookings yet. Browse
-  turfs →" with the browse CTA. Required for v1.
-- Error: error message via the existing ErrorBanner/useApiError
-  pattern.
+LEFT/TOP — "Current booking" panel (read-only summary):
+- Turf, sub-court, current date, current slots, current total.
+- "Cancel reschedule" link → back to receipt unchanged.
 
-URL semantics:
-- /customer/bookings?status=CONFIRMED&page=0 — bookmarkable.
-- Status="All" doesn't include the param (cleaner URL).
+RIGHT/BOTTOM — "New booking" panel (interactive):
+- Date picker. Default = current booking_date. Selecting a new
+  date triggers an availability fetch for that date.
+- Availability grid for the SAME sub-court (cross-sub-court
+  reschedule is NOT supported per the 6C Q1 decision). Use the
+  same multi-slot selection from 9-customer-booking: free/taken/
+  selected visual states, contiguous-only enforcement (choice a).
+- New total calculated client-side: selected slots count × rate.
+- Price-difference summary, live-updated as selection changes:
+  - "No price change" if diff == 0.
+  - "You'll be refunded ₹X" if diff < 0.
+  - "Additional ₹X to pay" if diff > 0.
+- "Continue" CTA, disabled if no slots selected or selection is
+  the same as the current booking (no-op reschedule).
 
-=== Page 2: Receipt page (/customer/bookings/:id) ===
+The "Continue" CTA fires the initiate call. From the response's
+`action_required` field, the next step diverges:
 
-This replaces the placeholder from 9-customer-booking. The receipt
-is the customer's record of the booking, and it has to honour the
-multi-payment/multi-refund shape from the 6A receipt fix.
+CASE NONE (equal price):
+- Confirmation modal: "Reschedule confirmed?" with old vs new
+  summary and a "Confirm" CTA.
+- Click → PUT /reschedule/confirm with the token. No Razorpay.
+- 200 → navigate to /customer/bookings/{id}. The receipt
+  reflects the new slots/date.
+- Errors per the mapping below.
 
-Layout:
-- Header with status badge prominently displayed (same color/
-  treatment as the list).
-- Turf, sub-court (clickable → /turfs/{turf_id}).
-- Date (human-readable).
-- Slots: list each slot's time range. For a 2-slot booking show
-  both slot ranges ("9:00 AM – 10:00 AM", "10:00 AM – 11:00 AM").
-- Total amount currently owed (bookings.total_amount).
-- PAYMENTS section: render the payments array.
-  - For a normal booking (1 payment): "Paid ₹X.XX on [date]".
-  - For a multi-payment booking (PAYMENT-reschedule history):
-    list each row chronologically: "Original payment: ₹X.XX on
-    [date]", "Additional charge: ₹X.XX on [date]". Display the
-    payment_method opaque string as-is ("card", "netbanking",
-    "upi" — don't transform; trust the wire format).
-- REFUNDS section (only if refunds array is non-empty):
-  - For a cancelled booking (full refund): "Refunded ₹X.XX on
-    [date]".
-  - For a reschedule-REFUND (partial refund): "Reschedule
-    refund: ₹X.XX on [date]".
-  - Each entry shows amount and date. The razorpay_refund_id is
-    optional (small text, or hidden — your call).
-- Action buttons (depend on booking status — see below).
+CASE REFUND (price decrease):
+- Confirmation modal: "Confirm reschedule? You'll be refunded
+  ₹X.XX." with old vs new + the refund amount.
+- Click → PUT /reschedule/confirm with the token. No Razorpay.
+- 200 → backend issues the partial refund, returns updated
+  booking. Navigate to receipt → shows new slots/date + the
+  partial refund visible in the refunds array.
+- Errors per the mapping.
 
-Action button logic:
-- Status CONFIRMED AND earliest slot >24h in the future:
-  Cancel button ENABLED.
-  Reschedule button ENABLED (placeholder in this sub-phase;
-  9-customer-lifecycle-2 implements the flow). On click in
-  this sub-phase show "Reschedule coming in next sub-phase."
-- Status CONFIRMED AND earliest slot ≤24h or in past:
-  Cancel button VISIBLE but DISABLED. Reschedule same.
-  Inline text below the buttons: "Cancel and reschedule are
-  unavailable within 24 hours of start time."
-- Status COMPLETED: no cancel/reschedule buttons. "Leave a
-  review" button placeholder (9-customer-lifecycle-2). Show
-  "Reviews coming in next sub-phase" on click.
-- Status CANCELLED or REFUNDED: no action buttons. The status
-  badge tells the story.
+CASE PAYMENT (price increase):
+- Review modal: "Pay ₹X additional to reschedule?" with old vs
+  new + the additional charge. CTA: "Pay ₹X.XX now."
+- Click → open Razorpay checkout.js with the initiate
+  response's order_id, key_id, amount. Same SDK loader pattern
+  from 9-customer-booking.
+- Razorpay success callback → PUT /reschedule/confirm with the
+  token AND the three Razorpay values.
+- 200 → navigate to receipt. Now shows: new slots/date, total
+  reflecting the increase, payments array with BOTH the
+  original and the additional charge (the multi-payment audit
+  trail that lifecycle-1 already renders).
+- Razorpay dismiss → "Payment cancelled" banner, selection
+  intact, no confirm call fired.
+- Errors per the mapping (race-after-payment 409, etc.).
 
-Date comparison for the 24h window:
-- The backend enforces this with Asia/Kolkata→Instant comparison.
-- The frontend can compute the same client-side using
-  toZonedTime or by treating the booking_date + slot start_time
-  string as IST, converting to a Date via Date('YYYY-MM-DDTHH:mm:00+05:30'),
-  and comparing to new Date(). State your approach.
-- A small precision detail: the frontend's "24h" check determines
-  whether the BUTTON is enabled. The backend's gate is authoritative
-  — if the frontend allows a click (button enabled) and the backend
-  rejects (just-crossed-the-window edge), the error mapping should
-  surface it cleanly. State that you don't try to second-guess the
-  backend.
+=== Error mapping for reschedule (state the table in your report) ===
+| Backend response on confirm | Frontend behavior |
+|---|---|
+| 200 OK | Navigate to /customer/bookings/{id} (receipt updated) |
+| 400 invalid token (expired or tampered) | "Reschedule session expired. Please start again." → back to receipt |
+| 409 pricing-change | "Rates changed since you started. Please review and try again." → back to /reschedule with same date selected (refetch availability/pricing) |
+| 409 slot-race | "One of your selected slots was just taken. Please pick again." → stay on /reschedule, refetch availability for the date |
+| 502 refund failure (REFUND case) | "Reschedule failed. Your booking is unchanged. Please try again." (same shape as cancel-502 from lifecycle-1) |
+| Other 4xx/5xx | "Something went wrong. Please try again." |
 
-States: same loading/error/not-found patterns as elsewhere. A 404
-from the backend (booking-not-yours or non-existent) shows "Booking
-not found" with a back-to-list CTA.
+For the PAYMENT case specifically, race-after-payment is the 409 the customer needs to understand: "This slot was taken after you paid. Your additional payment has been refunded — please pick a different slot." Same shape as 9-customer-booking's 409.
 
-=== Cancel flow ===
+=== Reviews on COMPLETED bookings ===
 
-Triggered by clicking the enabled Cancel button on the receipt
-page. Opens a confirmation modal:
-- Title: "Cancel this booking?"
-- Body: "You'll be refunded ₹X.XX to your original payment method.
-  This cannot be undone."
-- "Cancel booking" primary button (destructive treatment — red).
-- "Keep booking" secondary button (closes modal).
+On the receipt page (lifecycle-1), the "Leave a review" placeholder
+button only appears for COMPLETED bookings. This sub-phase
+implements the actual form.
 
-On "Cancel booking" confirm:
-- DELETE /api/customer/bookings/{id}.
-- 200 OK: page state updates IMMEDIATELY. Status badge changes to
-  REFUNDED. Refund row appears in the refunds array (the response
-  contains the updated booking state, or refetch). Cancel/
-  reschedule buttons disappear. NO toast, no notification — the
-  page change is the confirmation.
-- 400 (e.g., not in 24h window — shouldn't happen if button was
-  enabled correctly, but possible at the edge): error banner with
-  the backend's message.
-- 502 (refund-failure path from 6B-ii): error banner "Cancellation
-  failed. Your booking is unchanged. Please try again or contact
-  support." with a "Contact support" link (placeholder). DO NOT
-  imply the cancellation succeeded; the booking stays CONFIRMED
-  and the FAILED refund row is invisible to the customer for v1
-  (admin-queue concern).
-- Network error: "Couldn't reach the server. Please check your
-  connection and try again."
+Review widget (modal or inline expandable section):
+- Star rating: 5-star selector (click to set, hover to preview).
+- Comment textarea (note: backend may require non-empty — let the
+  backend's validation drive; show backend error if so).
+- Submit → POST /api/customer/reviews. On 200, the receipt
+  refetches and shows the review attached.
 
-=== Carried-forward contracts to enforce in this sub-phase ===
+If a review exists for the booking:
+- The button on the receipt changes to "View/edit your review."
+- Clicking opens the same widget pre-filled with the existing
+  rating + comment.
+- Submit → PUT /api/customer/reviews/{id}.
+- Delete button (with confirmation modal: "Delete your review?
+  This cannot be undone.") → DELETE → on success, refetch and
+  the button reverts to "Leave a review."
 
-1. payment_method is opaque varchar. Display whatever the wire
-   format returned. Don't transform "card" to "Credit Card" or
-   any cosmetic remap unless the backend returns the cosmetic
-   form already.
-2. The receipt's payments array can have 1+ entries. For booking
-   33 (from 9-customer-booking) it has 1. For owner 20's
-   booking 21 (from 6C-iii-1b) it has 2. Both render correctly.
-3. The receipt's refunds array can have 0+ entries with various
-   sources (cancel, reschedule, race-recovery — but race-recovery
-   is FILTERED OUT by the 6A endpoint, so the customer never sees
-   booking_id IS NULL rows). Trust the backend's filter.
-4. P1: cancel button disabled with inline text when outside the
-   24h window.
-5. P5: no customer-facing notification; page state is the
-   confirmation.
+The review shows on the receipt page in a small "Your review"
+section, displaying the rating, comment, posted-on date. If an
+owner reply exists for this review (from the owner-reply feature
+in 7A), show it below the review with "Owner reply:" prefix.
+
+=== Carried-forward contracts to enforce ===
+
+1. Razorpay SDK reload: the loader from 9-customer-booking
+   (utils/razorpay.js) is reused; the SDK loads once per session
+   and is reused for both bookings and reschedule-PAYMENT.
+2. Contiguous-only slot selection (lifecycle-1's pattern carries
+   over).
+3. Multi-payment receipt rendering from lifecycle-1 — the
+   PAYMENT reschedule will create a booking with 2 payments rows,
+   and the receipt will render both per the 6A receipt fix.
+4. Backend's reschedule_token has a 15-minute expiry (6C-i).
+   The frontend shouldn't try to refresh or extend it; if it
+   expires, the customer starts over.
+5. No customer-facing notifications. P5 page-update-as-confirmation.
 
 === Do NOT in this sub-phase ===
-- No reschedule logic (lifecycle-2).
-- No reviews (lifecycle-2).
+- No cross-sub-court reschedule (locked at 6C Q1).
+- No reschedule on COMPLETED, CANCELLED, REFUNDED bookings.
+- No "reschedule history" view (out of scope — schema
+  doesn't retain slot history per the 6C Q3 decision).
 - No backend changes.
-- No notifications-list page (already exists from 8C; this
-  sub-phase doesn't touch it).
-- No new dependencies.
 
-=== VERIFICATION via Playwright + dev server ===
+=== VERIFICATION via Playwright + real Razorpay test payment ===
 
-Same standard as 9-customer-booking: state the URL, action, network
-calls (URL + method + body where snake_case matters), and the visible
-result. Use the customer accounts that exist from prior sub-phases
-(testcust@verify.test, test9ts6148@bmt.test, etc.) plus the booking
-33 from 9-customer-booking.
+Same standard as 9-customer-booking. State URLs, network calls,
+visible results. The 9-customer-booking lesson on headless
+Razorpay applies — the PAYMENT case's modal may not be fully
+drivable via headless; use HMAC-valid synthetic confirm as
+backup for the cryptographic side and verify the Razorpay
+modal opens via DOM/iframe presence.
 
-1. Files created/modified.
+You may need to stage one or two fresh CONFIRMED bookings to
+run reschedule scenarios on (since each reschedule changes
+booking state, can't reuse). The existing bookings 33 (REFUNDED
+from earlier this conversation) and 34 (REFUNDED from lifecycle-1
+test 5d) can't be rescheduled. Make fresh bookings as needed
+via the 9-customer-booking flow.
 
-2. MY BOOKINGS LIST — log in as customer 47 (the one that booked
-   booking 33):
-   a. Visit /customer/bookings. Network: GET
-      /api/customer/bookings (snake_case params). Show the
-      response and verify booking 33 appears with the right
-      fields.
-   b. State the visible card layout: turf, sub-court, date, slot
-      range, status badge, total, "View details".
-   c. Filter by status=CONFIRMED. URL updates, network refetches
-      with ?status=CONFIRMED, only CONFIRMED bookings visible.
-   d. Filter by REFUNDED. If customer 47 has any REFUNDED
-      bookings, show; otherwise the empty state. (If the test
-      data doesn't include this, note it.)
-   e. Empty state: log in as a fresh customer with zero bookings.
-      Visit /customer/bookings → "You haven't made any bookings
-      yet" + browse CTA. Show.
+1. Files created/modified. State the route addition for
+   /customer/bookings/:id/reschedule.
 
-3. RECEIPT PAGE — customer 47, booking 33:
-   a. Click "View details" on booking 33. Navigate to /customer/
-      bookings/33.
-   b. Network: GET /api/customer/bookings/33. Show the response
-      shape (specifically: the payments array structure, refunds
-      array, status).
-   c. Visible content: turf, sub-court, date, slots (2 slot
-      ranges), total, payments section with 1 entry, refunds
-      empty, status CONFIRMED, Cancel and Reschedule buttons.
-   d. State whether earliest slot is >24h in the future (it
-      should be, since booking 33 was for 2026-07-15). The
-      Cancel and Reschedule buttons are ENABLED.
+2. RESCHEDULE PAGE — log in as customer 47:
+   a. Stage or use a CONFIRMED booking with slots >24h away.
+      State booking id, current slots, current total.
+   b. Navigate to its receipt. Click "Reschedule" button.
+      Network should NOT fire yet (page loads with current
+      booking state).
+   c. /customer/bookings/{id}/reschedule renders with the
+      "Current" panel showing booking details and an empty
+      "New" panel with date picker defaulted to current date.
 
-4. MULTI-PAYMENT RECEIPT — owner 20's customer credentials don't
-   exist in the build (owner 20 is the seller), but booking 21
-   was rescheduled-PAYMENT and has TWO payment rows. To verify the
-   multi-payment receipt render:
-   a. Log in as the CUSTOMER who owns booking 21 (state which
-      customer that is — likely customer 5 or similar from earlier
-      phases). If those credentials aren't known, log in as
-      whichever customer has access to booking 21 per
-      get-customer-id-from-bookings-table.
-   b. Navigate to /customer/bookings/21. Show network call.
-   c. Visible: payments section shows TWO entries (the original
-      and the additional charge). Refunds section shows the
-      partial refund from 6C-ii-3. State explicitly that both
-      payments and the refund are visible.
-   d. If those credentials aren't known and can't be reset for
-      testing, state so. The structural shape verification can
-      fall back to manually invoking the GET endpoint via curl
-      with a customer JWT and confirming the response shape.
+3. SLOT SELECTION on the new panel:
+   a. Pick a NEW date (different from current). Network: GET
+      /api/customer/turfs/{turf_id}/availability?date=...
+      (or /api/public/turfs/.../availability — state which).
+      Availability grid renders for the sub-court.
+   b. Select 2 contiguous free slots. Selection visualizes,
+      "New total: ₹X" updates, price-difference summary updates.
+      State the three sub-cases on a single setup:
+      - 2 slots same rate as current = EQUAL: "No price change"
+        + "Continue" CTA.
+      - Fewer slots = REFUND: "You'll be refunded ₹X" + CTA.
+      - More slots = PAYMENT: "Additional ₹X to pay" + CTA.
+      You may need to test with 3 different selections in
+      sequence to surface all three cases on the same booking.
 
-5. CANCEL FLOW — happy path:
-   a. On /customer/bookings/33 (CONFIRMED, >24h future): click
-      Cancel. Modal appears with the "you'll be refunded ₹X"
-      message and the two CTAs.
-   b. Click "Keep booking". Modal closes, no API call. Booking
-      unchanged.
-   c. Click Cancel again, then "Cancel booking". Network: DELETE
-      /api/customer/bookings/33. Show response.
-   d. Page state updates: status badge → REFUNDED. Refunds array
-      shows the new refund entry. Cancel/Reschedule buttons
-      disappear. State the visible diff.
-   e. Razorpay live state: the booking's original payment
-      (pay_xxx) shows amount_refunded equal to the full amount,
-      refund_status="full". Show.
-   f. No toast/notification displayed on top of the page change;
-      P5 invariant.
+4. CASE EQUAL — real confirm:
+   a. Select slots producing zero price diff (same number of
+      slots at same rate as current booking, different times).
+   b. Click "Continue". Network: POST
+      /api/customer/bookings/{id}/reschedule/initiate (snake_case
+      body). Response: action_required=NONE, reschedule_token.
+   c. Confirmation modal appears with old vs new. Click "Confirm".
+      Network: PUT
+      /api/customer/bookings/{id}/reschedule/confirm with the
+      token. Response 200.
+   d. Navigate back to /customer/bookings/{id}. Receipt now
+      shows the new slots/date. Status still CONFIRMED.
+   e. Raw SELECT confirming: booking row's total_amount
+      unchanged, booking_date updated if applicable,
+      booking_slots replaced (count) — same as 6C-ii-2.
 
-6. CANCEL — WITHIN 24H WINDOW (button disabled):
-   a. Find or stage a CONFIRMED booking with earliest slot within
-      24 hours from now. Stage by direct DB UPDATE on a booking's
-      booking_date / slot start_time if needed.
-   b. Navigate to its receipt. Cancel button is VISIBLE but
-      DISABLED. Inline text "Cancel and reschedule are unavailable
-      within 24 hours of start time" is visible below the button.
-   c. Try to click — nothing happens (or a tooltip appears,
-      depending on implementation). State which.
+5. CASE REFUND — real partial refund:
+   a. Stage another fresh CONFIRMED booking (or re-stage one
+      after restoring it to >24h state).
+   b. Select FEWER slots so price_diff < 0. Continue → initiate
+      returns action_required=REFUND with refund_amount.
+   c. Confirmation modal shows refund amount. Confirm → PUT
+      /reschedule/confirm. Response 200, REAL Razorpay refund
+      fires. Show:
+      - Razorpay live state: amount_refunded equals the partial
+        refund amount, refund_status=partial.
+      - DB raw SELECT: booking status STILL CONFIRMED (NOT
+        REFUNDED — DECISIONS §3), total_amount reduced, refunds
+        row with booking_id NOT NULL, status=SUCCESS, amount=
+        partial.
+   d. Receipt page shows new slots/date, reduced total, and
+      the partial refund visible in the refunds array.
 
-7. CANCEL — refund-failure path (502, from 6B-ii):
-   a. Enable the fault-injection flag (app.test.force-refund-
-      failure=true in application-local.properties), restart
-      backend.
-   b. Stage a fresh CONFIRMED booking with a real payment and
-      slot >24h. State the booking id.
-   c. As that customer, navigate to the booking's receipt, click
-      Cancel → "Cancel booking".
-   d. Network: DELETE returns 502.
-   e. Error banner shows "Cancellation failed. Your booking is
-      unchanged..." with a Contact support placeholder link.
-   f. Page state: booking STILL CONFIRMED. Cancel/Reschedule
-      buttons still enabled. No misleading state change.
-   g. Disable the flag (false), restart. Confirm the production
-      config is restored.
+6. CASE PAYMENT — real additional Razorpay payment:
+   a. Stage another fresh CONFIRMED booking.
+   b. Select MORE slots so price_diff > 0. Continue → initiate
+      returns action_required=PAYMENT with razorpay_order_id +
+      key_id + amount (the price_diff in paise) +
+      reschedule_token.
+   c. Review modal shows additional amount. Click "Pay ₹X now."
+      Razorpay checkout.js opens with the order. Show that the
+      modal opened (DOM/iframe assertion).
+   d. Complete payment with test card 5267318187975449 + OTP
+      111111.
+      - In headless mode this may not fully drive the modal;
+        fall back to HMAC-valid synthetic confirm (the pattern
+        from 9-customer-booking). State which approach used.
+   e. Razorpay success callback → PUT /reschedule/confirm with
+      the three Razorpay values + the token. Response 200.
+   f. Navigate to receipt. The booking now has 2 payments
+      visible in the payments array (original + additional
+      charge), new slots, new total reflecting the increase.
+   g. DB raw SELECT confirming: 2 payments rows for this
+      booking, both with booking_id NOT NULL, both SUCCESS;
+      original amount + additional amount; commission
+      recomputed; payout amount updated.
 
-8. STATUS FILTERS — REFUNDED and CANCELLED bookings:
-   a. After the cancel in test 5, navigate /customer/bookings
-      with ?status=REFUNDED. Booking 33 appears with the right
-      visual treatment.
-   b. View its receipt — no action buttons (status terminal).
-   c. If the test data has any CANCELLED bookings (DECISIONS §3
-      zero-amount edge case), verify they render with the right
-      treatment. If none exist (likely), note it.
+7. RESCHEDULE GUARDS:
+   a. Reschedule button disabled when slot is within 24h: same
+      verification as lifecycle-1 test 6.
+   b. Reschedule button absent on COMPLETED/REFUNDED/CANCELLED
+      bookings.
 
-9. AUTHORIZATION:
-   a. Customer A tries to GET /customer/bookings/{id} for
-      customer B's booking → 404, "Booking not found" page.
-   b. Anonymous user visits /customer/bookings → redirects to
-      /login (role guard).
+8. RESCHEDULE ERRORS:
+   a. 409 race-after-payment (if stageable): force a race
+      between initiate and confirm in the PAYMENT case. Show
+      the "additional payment refunded — please pick again"
+      message and the page state still showing the original
+      booking unchanged. If not stageable cleanly, document
+      that the code path exists per the error mapping table
+      and rely on backend 6C-iii-2 verification.
+   b. 400 expired token: select slots, click Continue (initiate
+      succeeds), wait >15 minutes, then click Confirm. The PUT
+      returns 400 invalid-token. Show the "session expired"
+      message and the redirect back to receipt. (If 15-min wait
+      is impractical, stage by setting
+      app.reschedule.token-expiry-seconds=10 in
+      application-local, then test, then restore. State the
+      flag wrangling.)
 
-10. URL ROUND-TRIP:
-    - /customer/bookings?status=CONFIRMED refresh → filter
-      preserved.
-    - /customer/bookings/33 refresh → page reloads correctly.
+9. REVIEWS — COMPLETED booking:
+   a. Find or stage a COMPLETED booking owned by a customer
+      with known credentials. Stage by direct DB UPDATE
+      changing booking status to COMPLETED on a real booking.
+      State which booking and customer used.
+   b. Receipt page now shows "Leave a review" button. Click.
+      Review form renders.
+   c. Submit a 4-star review with a comment. Network: POST
+      /api/customer/reviews (snake_case body). 200.
+   d. Receipt refetches, "Your review" section shows the
+      rating + comment + posted-on date.
+   e. Edit review: change to 5 stars, modify comment. PUT
+      /api/customer/reviews/{id}. Response 200. Receipt
+      refetches.
+   f. Delete review: confirmation modal → DELETE. Receipt
+      refetches, "Your review" section gone, button back to
+      "Leave a review."
+   g. DB raw SELECT: review row gone, turf's avg_rating and
+      review_count recomputed per 7A's contract.
 
-11. MOBILE: list page collapses to single column at ~375px;
-    receipt page stacks vertically.
+10. REVIEW GUARDS:
+    a. CONFIRMED booking: no review button. Show.
+    b. Try POST /api/customer/reviews with a CONFIRMED
+       booking_id → backend returns 400 (the 7A status
+       guard). State the error display.
+    c. Customer can't see another customer's review's edit/
+       delete (the buttons only appear on the customer's own
+       review on their own booking).
 
-12. NETWORK PAYLOAD: all params and bodies snake_case.
+11. NETWORK PAYLOADS: all bodies + params snake_case throughout.
 
-Do not begin 9-customer-lifecycle-2.
+12. P5 invariant: across all reschedule and review tests, no
+    customer-facing notifications created. State the
+    notifications count delta — should be only OWNER-directed
+    BOOKING_RESCHEDULED rows, no customer rows.
+
+9-customer-lifecycle is fully complete after this sub-phase. Do
+not begin the next sub-phase.

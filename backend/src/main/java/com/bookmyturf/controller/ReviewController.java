@@ -27,6 +27,13 @@ public class ReviewController {
 
     // ── Customer endpoints ────────────────────────────────────────────────────
 
+    @GetMapping("/api/customer/reviews/booking/{bookingId}")
+    public ResponseEntity<CreateReviewResponse> getReviewByBooking(
+            @AuthenticationPrincipal User user,
+            @PathVariable Long bookingId) {
+        return ResponseEntity.ok(reviewService.getReviewByBookingId(user, bookingId));
+    }
+
     @PostMapping("/api/customer/reviews")
     public ResponseEntity<CreateReviewResponse> createReview(
             @AuthenticationPrincipal User user,

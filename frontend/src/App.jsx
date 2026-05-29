@@ -11,8 +11,9 @@ import AdminHome    from './pages/AdminHome';
 import StaffHome    from './pages/StaffHome';
 import TurfList      from './pages/TurfList';
 import TurfDetail    from './pages/TurfDetail';
-import BookingReceipt from './pages/BookingReceipt';
-import MyBookings     from './pages/MyBookings';
+import BookingReceipt  from './pages/BookingReceipt';
+import MyBookings      from './pages/MyBookings';
+import ReschedulePage  from './pages/ReschedulePage';
 
 export default function App() {
   return (
@@ -29,6 +30,9 @@ export default function App() {
         {/* Booking pages — more specific than /customer/* so they match first */}
         <Route path="/customer/bookings" element={
           <RoleGuard role="CUSTOMER"><MyBookings /></RoleGuard>
+        } />
+        <Route path="/customer/bookings/:id/reschedule" element={
+          <RoleGuard role="CUSTOMER"><ReschedulePage /></RoleGuard>
         } />
         <Route path="/customer/bookings/:id" element={
           <RoleGuard role="CUSTOMER"><BookingReceipt /></RoleGuard>
