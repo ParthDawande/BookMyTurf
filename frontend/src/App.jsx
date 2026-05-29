@@ -9,8 +9,9 @@ import CustomerHome from './pages/CustomerHome';
 import OwnerHome    from './pages/OwnerHome';
 import AdminHome    from './pages/AdminHome';
 import StaffHome    from './pages/StaffHome';
-import TurfList     from './pages/TurfList';
-import TurfDetail   from './pages/TurfDetail';
+import TurfList      from './pages/TurfList';
+import TurfDetail    from './pages/TurfDetail';
+import BookingReceipt from './pages/BookingReceipt';
 
 export default function App() {
   return (
@@ -24,6 +25,10 @@ export default function App() {
         <Route path="/turfs"      element={<TurfList />} />
         <Route path="/turfs/:id"  element={<TurfDetail />} />
 
+        {/* Receipt page — more specific than /customer/* so it matches first */}
+        <Route path="/customer/bookings/:id" element={
+          <RoleGuard role="CUSTOMER"><BookingReceipt /></RoleGuard>
+        } />
         <Route path="/customer/*" element={
           <RoleGuard role="CUSTOMER"><CustomerHome /></RoleGuard>
         } />
