@@ -1,401 +1,313 @@
-PHASE 9-admin-operations — Approval queues (turfs + sub-courts),
-user management with search, staff management, complaints/queries
-admin override. The largest single sub-phase of the build.
+PHASE 9-staff — Staff portal. Assigned complaints + query pool
+(claim-and-resolve workflow) + notifications. Smallest role portal.
 
-Standing rules apply. Stop and report. Do NOT start 9-staff. Reuse
-Phase 0 error shape, Phase 2 security UNCHANGED. The backend is
-frozen for substantive business logic; small surgical additions
-allowed per the established pattern if a needed endpoint doesn't
-exist (verify first, decide separately). No new dependencies.
+Standing rules apply. Stop and report. After acceptance, all four
+role portals are complete and we move to the final integration
+sweep. Reuse Phase 0 error shape, Phase 2 security UNCHANGED. The
+backend is frozen for substantive business logic; small surgical
+additions allowed per the established pattern if a needed endpoint
+doesn't exist (verify first, decide separately).
 
-SCOPE: four operational feature areas in one bundle. Replaces the
-five stubs in /admin/* from 9-admin-foundation-and-dashboard:
-- /admin/approvals — pending turfs + pending sub-courts queues
-  with approve/reject.
-- /admin/users — paginated list with search by email/name +
-  role filter, suspend/ban/activate actions.
-- /admin/staff — staff list with create/deactivate/reactivate.
-- /admin/complaints + /admin/queries — admin-override views
-  with reassign (complaints only) and resolve actions.
+SCOPE: three things in this sub-phase.
+- StaffNav (Complaints / Queries / Notifications).
+- /staff/complaints — assigned complaints list with notes + resolve.
+- /staff/queries — query pool (claim) + my queries (notes + resolve).
+- /staff/notifications mounts the reusable NotificationsPage with
+  StaffNav prop.
+
+Same architectural pattern as 9-owner-foundation-and-dashboard and
+9-admin-foundation-and-dashboard combined into one sub-phase
+because staff has less surface to cover.
 
 === Locked design decisions ===
-- Q1: Approve via confirmation modal (no reason required). Reject
-  via modal with REQUIRED reason field (admin must type why).
-  Backend's Phase 4 reject endpoint probably accepts a reason
-  field — verify and use whatever shape the DTO has. If the
-  backend doesn't require a reason, the frontend still requires
-  it as UX policy and sends it as part of the request.
-- Q2: User list paginated + search by email/name + role filter.
-  Backend endpoint shape needs verification via curl — likely
-  ?role=&search=&page=&size=. State actual shape.
-- Q3 (default): Admin sets initial password when creating staff.
-  Display a banner on staff list: "New staff should reset their
-  password after first login. (Password reset flow is a v2 polish
-  item.)"
-- Q4 (default): Inline actions on /admin/complaints and
-  /admin/queries — list view IS the action surface, with
-  Reassign + Resolve buttons on each card. Modals for both
-  actions with required fields.
-- Confirmation modals for all destructive/material actions (ban,
-  reject, deactivate-staff, resolve, reassign). Suspend/activate
-  also confirm.
+- Q1: Staff lands at /staff/complaints. /staff stub from
+  9-foundation becomes a redirect to /staff/complaints. No
+  staff dashboard with KPIs — the assigned-complaints list IS
+  the landing page.
+- Q2: One page at /staff/queries with two tabs: "Pool"
+  (unclaimed OPEN queries available to claim) and "Mine"
+  (claimed/assigned queries). Default tab "Mine" — staff's own
+  work first.
+- A small "what's on my plate" banner above the complaint list
+  showing assigned count + claimed query count for at-a-glance
+  context.
+- Notes are visible to staff and admin (internal only per 7B Q1),
+  NEVER to customer. Frontend doesn't need to enforce this since
+  it's a staff-only page, but it's worth being conscious that
+  notes are internal.
 
 === Pre-build endpoint discovery (verify all via curl) ===
 
-APPROVALS:
-- GET /api/admin/turfs?status=PENDING — list pending turfs.
-- POST or PUT /api/admin/turfs/{id}/approve — approve.
-- POST or PUT /api/admin/turfs/{id}/reject — reject with reason.
-- Same shapes for sub-courts: /api/admin/sub-courts/...
-State actual endpoint paths and request body shapes.
+ASSIGNED COMPLAINTS:
+- GET /api/staff/complaints (assigned to this staff). Likely accepts
+  status, page, page_size. Verify shape.
+- POST /api/staff/complaints/{id}/notes — add a note. Body shape?
+- GET /api/staff/complaints/{id}/notes — list notes for a complaint.
+- POST /api/staff/complaints/{id}/resolve — resolve with
+  resolution_note (same body as admin's resolve).
 
-USER MANAGEMENT:
-- GET /api/admin/users — likely accepts role, search, status,
-  page, page_size. State shape.
-- PUT or POST /api/admin/users/{id}/suspend, /ban, /activate
-  (likely separate endpoints per action). State shape.
+QUERY POOL + MINE:
+- GET /api/staff/queries — likely accepts mode ("pool" / "mine") OR
+  a status filter that achieves the same. Verify how the backend
+  exposes this. Per 7C the queries table has picked_up_by_staff_id;
+  "pool" probably means picked_up_by_staff_id IS NULL, "mine" means
+  picked_up_by_staff_id = current_user.
+- POST /api/staff/queries/{id}/claim — atomic claim per 7C
+  (UPDATE ... WHERE id = ? AND status = 'OPEN' with row-count check
+  for race detection).
+- POST /api/staff/queries/{id}/notes — add note (likely same shape
+  as complaint notes).
+- GET /api/staff/queries/{id}/notes — list notes.
+- POST /api/staff/queries/{id}/resolve — resolve with resolution_note.
 
-STAFF MANAGEMENT:
-- GET /api/admin/staff — list staff accounts.
-- POST /api/admin/staff — create staff (body: name, email, phone,
-  password). Verify shape.
-- PUT /api/admin/staff/{id}/deactivate or .../activate — state
-  shape.
+If any endpoint doesn't exist, surface it before building. Don't
+assume — verify each via curl with staff9a@bmt.test's token.
 
-COMPLAINTS OVERRIDE:
-- GET /api/admin/complaints — list ALL complaints (not just
-  staff-assigned). Likely accepts status, page, page_size,
-  optionally assignedStaffId.
-- PUT /api/admin/complaints/{id}/reassign — body
-  {staff_id: <new staff>}.
-- PUT /api/admin/complaints/{id}/resolve — body
-  {resolution_note: "..."}.
+=== StaffNav component ===
 
-QUERIES OVERRIDE:
-- GET /api/admin/queries — list all queries.
-- PUT /api/admin/queries/{id}/resolve — body
-  {resolution_note: "..."}. Note: queries don't have
-  reassignment per 7C (atomic-claim model).
+Horizontal sub-nav. Items:
+- Complaints → /staff/complaints (active by default — landing).
+- Queries → /staff/queries.
+- Notifications → /staff/notifications.
 
-Verify all endpoints exist. If any doesn't, state and discuss
-before building UI against it.
+Use a distinct active-indicator color (red, orange, teal — whatever
+the design tokens have available that isn't already used for
+customer/owner/admin). State your choice.
 
-=== /admin/approvals page ===
+=== /staff/complaints page ===
 
 Layout:
-- Header + AdminNav with Approvals active.
-- Page title: "Pending Approvals".
-- Two sections (tabs or two grouped lists):
-  - Turfs awaiting approval (count from dashboard's
-    pending_approvals.turfs).
-  - Sub-courts awaiting approval (count from
-    pending_approvals.sub_courts).
-
-For each PENDING turf:
-- Cover photo (or placeholder).
-- Turf name, city, owner (name + email).
-- Description excerpt.
-- Sub-courts list (count or first few).
-- Approve button (green) + Reject button (red).
-
-Approve flow:
-- Click Approve → confirmation modal: "Approve {turf name}?
-  This turf will become visible to customers."
-- Confirm → PUT /api/admin/turfs/{id}/approve. 200 → card
-  disappears from queue. No toast.
-- Error → ErrorBanner.
-
-Reject flow:
-- Click Reject → modal with required textarea "Reason for
-  rejection (the owner will see this)." Submit disabled if
-  textarea is empty.
-- Submit → PUT /api/admin/turfs/{id}/reject with
-  {reason: "..."}. 200 → card disappears.
-- Error → ErrorBanner.
-
-Same flows for sub-courts. Sub-court approval is independent
-of turf approval (a turf can be APPROVED while one of its
-sub-courts is still PENDING per Phase 4 contract).
-
-Empty state: "No pending approvals." Shown when both queues
-empty.
-
-=== /admin/users page ===
-
-Layout:
-- Header + AdminNav with Users active.
-- Page title: "User Management".
-- Filter row:
-  - Role dropdown: All / CUSTOMER / OWNER / STAFF / ADMIN.
-  - Status dropdown: All / ACTIVE / SUSPENDED / BANNED.
-  - Search input: "Search by email or name..." Submits on
-    enter or button click.
-- User table or card list:
-  - Columns: Name, Email, Role, Status (badge color-coded),
-    Joined date, Actions.
-  - Actions per status:
-    - ACTIVE: Suspend button + Ban button.
-    - SUSPENDED: Activate button + Ban button.
-    - BANNED: Activate button (un-bans).
-- Pagination at the bottom.
-
-All actions use confirmation modals:
-- "Suspend {user name}? They won't be able to log in until
-  reactivated."
-- "Ban {user name}? This is a strong action — they won't be
-  able to access the platform. You can reactivate later if
-  needed."
-- "Activate {user name}? They'll regain platform access."
-
-Each modal action → PUT to the appropriate endpoint. List
-refetches on success.
-
-URL semantics:
-?role=OWNER&status=ACTIVE&search=verify&page=0&size=20 (snake_case).
-Bookmarkable.
-
-Empty state: "No users match your filters."
-
-=== /admin/staff page ===
-
-Layout:
-- Header + AdminNav with Staff active.
-- Page title: "Staff Management".
-- Banner at top: "New staff should reset their password after
-  first login. (Password reset flow is a v2 polish item.)"
-- "+ Add new staff" CTA at the top right.
-- Staff table:
-  - Columns: Name, Email, Status, Joined, Actions.
-  - Actions: Deactivate (if active) / Activate (if not active).
-
-Create staff modal:
-- Fields: name (required), email (required, valid), phone
-  (required), password (required, with backend's complexity
-  rules — show inline hint about rules per Phase 2 spec).
-- Submit → POST /api/admin/staff. 201 → modal closes, list
-  refetches with new staff visible.
-
-Deactivate/activate flows: confirmation modal → PUT → list
-refetches.
-
-States: loading, error, empty.
-
-=== /admin/complaints page ===
-
-Layout:
-- Header + AdminNav with Complaints active.
-- Page title: "Complaints" (with badge showing open count
-  matching dashboard's open_complaints).
-- Filter row: Status (All / OPEN / IN_PROGRESS / RESOLVED).
-- Complaint table or card list:
-  - Customer name + email.
-  - Subject + description excerpt.
-  - Related booking (if booking_id set, link to admin's
-    booking-view — that doesn't exist as a route, so just
-    show "Booking #X at Turf Y" as text).
+- Header + StaffNav with Complaints active.
+- Page title: "My Complaints" or "Assigned to Me."
+- Banner at top: "You have {assignedCount} complaints assigned and
+  {claimedCount} queries claimed." (Pull claimedCount via a separate
+  fetch to /api/staff/queries?mode=mine or equivalent.)
+- Status filter: All / IN_PROGRESS / RESOLVED. Default
+  "IN_PROGRESS" — staff's active work first. RESOLVED tab lets
+  staff see their work history.
+- List of complaint cards. Each card:
+  - Customer name, email, subject.
+  - Description excerpt (if list response includes it; otherwise
+    "View details" link to a detail page).
+  - Related booking (if booking_id set, show "Re: Booking #X at
+    Turf Y" text).
   - Status badge.
-  - Assigned to (staff name or "Unassigned").
   - Created date.
-  - Actions: Reassign + Resolve (conditional on status).
+  - Notes count (from the notes list or a count field).
+  - "Add note" CTA.
+  - "Resolve" CTA (conditional on status — only for IN_PROGRESS).
 
-Reassign flow (only for OPEN or IN_PROGRESS):
-- Modal: "Reassign complaint #X to:" with staff dropdown
-  (populated from GET /api/admin/staff or whatever staff
-  list endpoint is available). Required selection.
-- Submit → PUT /api/admin/complaints/{id}/reassign with
-  {staff_id}. 200 → list refetches.
+Add note flow:
+- Modal or inline expand: textarea for note content. Submit →
+  POST notes endpoint. 201 → list refetches, notes count updates.
+  No toast.
 
-Resolve flow (admin override, only for OPEN or IN_PROGRESS):
+Resolve flow:
 - Modal: "Resolve complaint #X" with required resolution_note
-  textarea.
-- Submit → PUT /api/admin/complaints/{id}/resolve with
-  {resolution_note}. 200 → list refetches.
+  textarea (matches admin resolve flow from 9-admin-operations).
+- Submit → POST /api/staff/complaints/{id}/resolve with
+  {resolution_note}. 200 → list refetches, complaint now in
+  RESOLVED status.
+- Empty resolution_note → submit disabled.
 
-Complaint detail view: optional. If the list shows enough info
-inline, no detail page needed in v1. Verify the list response
-includes all needed fields (description, customer info, etc.).
-If not, add a /admin/complaints/{id} detail page.
+If the list response doesn't include enough info to show the full
+complaint context, add a /staff/complaints/{id} detail page that
+shows the full description, customer info, all notes, and the
+action buttons. Decide based on the list shape — verify via curl.
 
-States: loading, error, empty.
+=== /staff/queries page ===
 
-=== /admin/queries page ===
+Layout:
+- Header + StaffNav with Queries active.
+- Page title: "Queries."
+- Two tabs at the top:
+  - "Mine" (default, shows assigned-to-me queries — filterable
+    by IN_PROGRESS / RESOLVED, default IN_PROGRESS).
+  - "Pool" (unclaimed OPEN queries available to claim).
 
-Same shape as complaints but without reassign (per 7C
-atomic-claim model — queries don't have static assignment to
-reassign).
+Tab "Mine":
+- Same shape as complaints. Each query card has Add Note + Resolve
+  buttons (conditional on status).
+- Resolve modal same shape as complaints — required resolution_note.
 
-Filter row: Status (All / OPEN / IN_PROGRESS / RESOLVED).
-Each query card: customer, subject, description excerpt,
-status badge, picked_up_by_staff (name or "Unclaimed"),
-created date, Resolve action.
+Tab "Pool":
+- List of OPEN unclaimed queries.
+- Each card: customer name, subject, description excerpt, created
+  date, "Claim" button.
+- Claim flow:
+  - Click "Claim". No confirmation modal (claiming is reversible
+    in v1 if staff just doesn't resolve it; not destructive).
+  - Network: POST /api/staff/queries/{id}/claim.
+  - 200 → the query disappears from Pool tab and appears under
+    Mine tab.
+  - 409 (race — another staff member just claimed it): error
+    banner "This query was just claimed by another staff member.
+    Please pick another." Refetch the pool list.
+  - Other 4xx/5xx: generic error.
 
-Resolve flow: same as complaints (modal with required
-resolution_note → PUT /api/admin/queries/{id}/resolve).
+The atomic-claim race (7C) is real and worth verifying — two staff
+members clicking claim on the same query at the same time, one
+gets 200 and the other gets 409. v1 verification can simulate
+this via a curl race or a controlled DB UPDATE between the GET and
+the POST. State your approach.
+
+=== /staff/notifications ===
+
+Mount the reusable NotificationsPage with StaffNav prop. Staff has
+real notifications (COMPLAINT_ASSIGNED from admin actions in
+9-admin-operations testing — at least the assignments we made
+during item 8 of that sub-phase).
+
+No new code beyond the route mount + Nav prop.
 
 === Carried-forward contracts ===
 
-1. P5: page-state-as-confirmation. After approve/reject/
-   suspend/ban/resolve/reassign, the list refetches and
-   reflects the new state. No toast.
-2. Snake_case throughout.
-3. 404-not-403 on cross-resource ownership where applicable
-   (mostly N/A for admin — admin sees everything).
-4. Backend enforces resolution_note non-empty per 7B; frontend
-   gates submit if textarea empty.
-5. Backend enforces one resolve per complaint per 7B; if admin
-   resolves a complaint that's already RESOLVED, 400 from
-   backend.
-6. Phase 2 routing: per-request DB status check. Admin actions
-   on a user that admin just banned (suspend then ban quickly)
-   — the per-request check applies on subsequent requests, so
-   the user is locked out at their next page load regardless
-   of session state.
-7. Notifications: §5 says owner gets TURF_APPROVED /
-   TURF_REJECTED / SUBCOURT_APPROVED / SUBCOURT_REJECTED when
-   admin acts on their turf/sub-court. Staff gets
-   COMPLAINT_ASSIGNED when admin reassigns. These notifications
-   fire from the backend automatically; the admin doesn't need
-   to do anything special in the UI to trigger them. Verify
-   they fire as a side effect of admin actions.
+1. The state machine: complaint must be IN_PROGRESS to be resolved.
+   Since assigned complaints are always IN_PROGRESS (admin assigned
+   them or staff claimed them — both transitions move status), the
+   Resolve button just works without UI gating. Verify.
+2. Notes are internal — staff page is staff-only, no leak by design.
+3. P5: page-state-as-confirmation. No toasts.
+4. §5: ZERO customer-facing notifications. Resolve fires no
+   notifications per the 7B/7C contracts (resolution is internal
+   tracking).
+5. Snake_case throughout.
+6. The reusable NotificationsPage component now mounts in four
+   role portals total: customer, owner, admin, staff. State that
+   StaffNav is the fourth Nav prop value.
+7. Atomic claim (7C): the row-count check on UPDATE
+   queries SET picked_up_by_staff_id = ? WHERE id = ? AND status = 'OPEN'
+   determines success vs 409.
 
 === Do NOT in this sub-phase ===
-- No staff-portal work (9-staff).
-- No customer or owner side changes.
-- No backend changes for substantive logic; small surgical
-  additions allowed only if a verified endpoint doesn't exist.
-- No new charting libraries.
+- No customer/owner/admin side changes.
+- No backend changes for substantive logic.
+- No new dependencies.
+- Don't build a separate staff dashboard with KPIs — landing is
+  the complaints list.
 
-=== STAFF TEST ACCOUNT — CAPTURE FOR 9-STAFF ===
-- During this sub-phase, you'll create at least one staff
-  account via the admin "+ Add new staff" flow.
-- CAPTURE the credentials (email + initial password) and
-  state them clearly in the verification report — 9-staff
-  needs them to log in.
+=== VERIFICATION via Playwright + dev server ===
 
-=== VERIFICATION via Playwright + real action against real
-backend ===
+Use staff9a@bmt.test / TestStaff@123 (user_id=53, captured during
+9-admin-operations). Also use staff7b2 (the original staff from
+7B) if a known password exists; if not, all multi-staff testing
+can be done with just staff9a + a stage of a second staff via
+admin endpoints if needed.
 
-Use admin@bookmyturf.in. Use the existing test data state from
-the 9-admin-foundation-and-dashboard acceptance: 3 pending
-turfs, 4 pending sub-courts, 11 open complaints, 7 open queries,
-17 customers + 12 owners + 3 staff active.
+The test data state from 9-admin-operations acceptance: staff9a
+has 1 assigned complaint (complaint_id=5, assigned during item 8)
+which is IN_PROGRESS. staff9a has 1 claimed query (query_id=5,
+claimed during item 9) which is RESOLVED. Plus 10 OPEN complaints
+total (some assigned to other staff, some unassigned), 6 OPEN
+queries in pool.
 
-1. Files created/modified. State all endpoint shapes verified
-   via curl. State any divergence from the prompt's expected
-   shapes. Identify any missing endpoints if any.
+1. Files created/modified. State all endpoint shapes verified via
+   curl. State the StaffNav active-color choice.
 
-2. APPROVALS — TURFS:
-   a. /admin/approvals. Network: GET /api/admin/turfs?status=PENDING.
-      Show response.
-   b. State the 3 pending turfs visible with owner info.
-   c. Approve one. Modal appears with turf details. Confirm.
-      Network: PUT to approve endpoint with snake_case body.
-      200 response. Card disappears from queue.
-   d. DB raw SELECT: that turf's status is now APPROVED.
-   e. Owner notifications: verify TURF_APPROVED notification
-      created for that turf's owner.
-   f. Public listing: GET /api/public/turfs anonymous now
-      includes the newly-approved turf (it wasn't visible
-      before).
+2. STAFF LOGIN:
+   a. Log in as staff9a@bmt.test / TestStaff@123. Land on
+      /staff/complaints (not /staff stub).
+   b. StaffNav visible with Complaints active. Banner visible with
+      assigned + claimed counts.
 
-3. APPROVALS — TURFS — REJECT:
-   a. Reject another pending turf. Modal with required reason.
-      Empty reason: submit disabled.
-   b. Enter reason "Photos are too low quality. Please add
-      higher-resolution photos and resubmit." Submit.
-   c. Network: PUT reject endpoint with reason. 200.
-   d. DB: status=REJECTED, rejection_reason saved (if
-      schema has the column — verify).
-   e. Owner notifications: TURF_REJECTED notification created.
+3. /staff/complaints — ASSIGNED LIST:
+   a. Network: GET /api/staff/complaints. Show response.
+   b. The IN_PROGRESS filter default shows complaint #5 (which
+      admin assigned to staff9a in 9-admin-operations item 8).
+   c. State the card layout: customer, subject, related booking,
+      status, created date, notes count.
+   d. If staff has only the one assigned complaint, the list
+      shows just that. State.
 
-4. APPROVALS — SUB-COURTS:
-   a. Approve a pending sub-court. Similar to turfs.
-   b. Reject another with reason. Similar.
-   c. DB confirms sub_courts.status = APPROVED / REJECTED.
+4. ADD NOTE TO COMPLAINT:
+   a. Click "Add note" on complaint #5. Modal with textarea.
+   b. Submit "Initial review — contacted customer." Network: POST
+      /api/staff/complaints/5/notes. Show body and response.
+   c. 201 → notes count updates from 0 → 1. (Or the notes are
+      shown inline if your design includes them.)
+   d. DB raw SELECT: complaint_notes (or whatever table) has the
+      new note with the right complaint_id and author_id (staff9a's
+      user_id=53). Verify per the 7B carried-forward rename:
+      author_id, not staff_id.
 
-5. USERS — LIST + FILTERS:
-   a. /admin/users. Network: GET /api/admin/users.
-   b. State total count and visible page size.
-   c. Filter by role=OWNER. Refetch. Only owners visible.
-   d. Filter by status=ACTIVE. Refetch.
-   e. Search "verify" (matches several test emails like
-      testcust@verify.test, freshowner@verify.test, etc.).
-      Network includes ?search=verify. Verify the search
-      narrows results.
-   f. Pagination: page 0 → page 1. Different users on each.
+5. RESOLVE A COMPLAINT:
+   a. Click "Resolve" on complaint #5. Modal with required
+      resolution_note.
+   b. Empty note: submit disabled.
+   c. Enter "Customer issue addressed. Refund processed via
+      support." Submit.
+   d. Network: POST /api/staff/complaints/5/resolve. 200.
+   e. List refetches. Complaint #5 disappears from IN_PROGRESS
+      list. Switch to RESOLVED filter — complaint #5 visible.
+   f. DB raw SELECT: complaints.status=RESOLVED,
+      complaints.resolved_at SET, resolution_note saved.
+   g. State explicitly: NO customer-facing notification was created
+      as a result (§5).
 
-6. USERS — SUSPEND/BAN/ACTIVATE:
-   a. Suspend an OWNER. Confirmation modal → PUT suspend.
-      200. List refetches. User's status badge now SUSPENDED.
-   b. Try logging in as that suspended user — login attempt
-      should fail (Phase 2 per-request check).
-   c. Activate. PUT activate. Status ACTIVE.
-   d. Login retry — succeeds.
-   e. Ban a CUSTOMER. Same flow. Verify ban prevents login.
-   f. Activate. Same.
+6. /staff/queries — POOL TAB:
+   a. Switch to /staff/queries. Default tab = Mine (showing
+      query #5 RESOLVED).
+   b. Switch to Pool tab. Network: GET with the "pool" filter
+      (whatever the backend exposes — state).
+   c. Show the count of OPEN unclaimed queries. Should match the
+      dashboard's open_queries number minus IN_PROGRESS / claimed.
 
-7. STAFF — CREATE + LIFECYCLE:
-   a. /admin/staff. Initial list shows 3 existing staff.
-   b. "+ Add new staff" → modal with name/email/phone/password.
-   c. Submit with name "Test Staff One", email "staff9a@bmt.test",
-      phone, password "TestStaff@123" (or whatever meets the
-      complexity rules — state what you used).
-   d. Network: POST. 201 → modal closes, list now shows
-      4 staff including the new one.
-   e. DB raw SELECT: users table has the new staff with
-      role=STAFF, status=ACTIVE.
-   f. CAPTURE THESE CREDENTIALS IN REPORT FOR 9-STAFF USE.
-   g. Deactivate a staff member. PUT deactivate. Status changes.
-   h. Reactivate. PUT activate.
+7. CLAIM A QUERY:
+   a. Click Claim on one of the pool queries. Network: POST
+      /api/staff/queries/{id}/claim. 200.
+   b. Query disappears from Pool tab.
+   c. Switch to Mine tab. Query now visible with status
+      IN_PROGRESS, picked_up_by_staff_id=53.
+   d. DB raw SELECT: queries.picked_up_by_staff_id=53,
+      queries.status=IN_PROGRESS (or whatever the post-claim
+      status is — verify against the backend behavior).
 
-8. COMPLAINTS OVERRIDE:
-   a. /admin/complaints. Network: GET. Show response shape.
-   b. State the visible OPEN complaints (matching the
-      dashboard's 11).
-   c. Reassign one complaint. Modal with staff dropdown.
-      Select the newly-created staff. Submit → PUT reassign
-      with {staff_id}. 200. List shows new assignee.
-   d. DB raw SELECT: complaints.assigned_staff_id updated.
-   e. Notifications: COMPLAINT_ASSIGNED notification created
-      for the new staff.
-   f. Resolve a different complaint directly (admin override).
-      Modal with required resolution_note. Empty: disabled.
-   g. Submit "Resolved by admin during platform review." → PUT
-      resolve. 200.
-   h. DB raw SELECT: status=RESOLVED, resolved_at set,
+8. ATOMIC CLAIM RACE (7C):
+   a. Pick an unclaimed query. Note its id.
+   b. Open two browser tabs (or use curl + browser) as staff9a.
+      In one tab, click Claim. The other immediately tries to
+      claim the same.
+   c. First request: 200. Second request: 409 with message about
+      "already claimed" or equivalent.
+   d. UI on the second tab: shows "This query was just claimed by
+      another staff member. Please pick another." Pool refetches.
+   e. If two-tab simulation is impractical via Playwright,
+      simulate via curl race: one curl claims, a second curl
+      claims the same id. State your approach.
+
+9. ADD NOTE + RESOLVE A QUERY:
+   a. Same flow as complaint notes + resolve. State the network
+      calls and DB state.
+   b. DB: query_notes row with right query_id and author_id=53.
+   c. Resolve: queries.status=RESOLVED, queries.resolved_at SET,
       resolution_note saved.
 
-9. QUERIES OVERRIDE:
-   a. /admin/queries. Network: GET. Show response shape.
-   b. Resolve one with the override action. Same modal pattern.
-   c. DB confirms resolution.
+10. /staff/notifications:
+    a. Mount with StaffNav. Should show staff9a's notifications.
+    b. From 9-admin-operations item 8, COMPLAINT_ASSIGNED notification
+       id=6 was created for staff9a. List should include it.
+    c. StaffNav visible (not OwnerNav, AdminNav, or CustomerNav).
 
-10. NOTIFICATIONS SIDE EFFECTS:
-    Summary count of notifications created during this entire
-    test run:
-    - TURF_APPROVED: at least 1.
-    - TURF_REJECTED: at least 1.
-    - SUBCOURT_APPROVED: at least 1.
-    - SUBCOURT_REJECTED: at least 1.
-    - COMPLAINT_ASSIGNED: at least 1.
-    - ZERO customer-facing types (§5).
-    State the SELECT counts to verify.
-
-11. CROSS-ROLE GUARDS:
-    a. Owner navigates to /admin/approvals → redirect to /.
-    b. Customer same.
-    c. Staff same.
+11. ROLE GUARDS:
+    a. Customer → /staff/complaints redirects to /.
+    b. Owner same.
+    c. Admin same.
     d. Anonymous → /login.
 
-12. SNAPSHOT ACCURACY AFTER OPERATIONS:
-    a. After several approvals/resolutions/staff creation:
-       reload /admin/dashboard. The pending_approvals count
-       has decreased. The open_complaints/open_queries counts
-       have decreased. active_users.staff increased by 1.
-    b. State the before/after numbers.
+12. CROSS-STAFF ISOLATION:
+    a. Log in as a DIFFERENT staff member (e.g., one of the original
+       7B staff if a working password exists, or stage by admin
+       suspending+activating one to reset; or create a third staff
+       via /admin/staff and use those credentials).
+    b. Navigate to /staff/complaints. The list should ONLY show
+       complaints assigned to THIS staff, not staff9a's.
+    c. Try to GET /api/staff/complaints/{staff9a-complaint-id}/notes
+       via curl. Should return 404 (or 403 — verify Phase 7B contract).
+       This is the no-leak boundary at the staff layer.
 
 13. NETWORK PAYLOADS: snake_case throughout.
 
-14. MOBILE: each admin page responsive at 375px width.
+14. MOBILE: responsive at 375px.
 
-Do not begin 9-staff.
+After acceptance, all four role portals are complete. We move to
+the final integration sweep / production checklist.

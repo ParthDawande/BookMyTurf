@@ -36,6 +36,9 @@ import AdminStaff      from './pages/AdminStaff';
 import AdminComplaints from './pages/AdminComplaints';
 import AdminQueries    from './pages/AdminQueries';
 import AdminNav        from './components/AdminNav';
+import StaffComplaints from './pages/StaffComplaints';
+import StaffQueries    from './pages/StaffQueries';
+import StaffNav        from './components/StaffNav';
 
 function CG({ children }) {
   return <RoleGuard role="CUSTOMER">{children}</RoleGuard>;
@@ -92,7 +95,12 @@ export default function App() {
         <Route path="/admin/complaints"    element={<RoleGuard role="ADMIN"><AdminComplaints /></RoleGuard>} />
         <Route path="/admin/queries"       element={<RoleGuard role="ADMIN"><AdminQueries /></RoleGuard>} />
         <Route path="/admin/*"             element={<RoleGuard role="ADMIN"><AdminDashboard /></RoleGuard>} />
-        <Route path="/staff/*"  element={<RoleGuard role="STAFF"><StaffHome /></RoleGuard>} />
+        {/* Staff */}
+        <Route path="/staff"                 element={<Navigate to="/staff/complaints" replace />} />
+        <Route path="/staff/complaints"      element={<RoleGuard role="STAFF"><StaffComplaints /></RoleGuard>} />
+        <Route path="/staff/queries"         element={<RoleGuard role="STAFF"><StaffQueries /></RoleGuard>} />
+        <Route path="/staff/notifications"   element={<RoleGuard role="STAFF"><NotificationsPage Nav={StaffNav} /></RoleGuard>} />
+        <Route path="/staff/*"               element={<RoleGuard role="STAFF"><StaffComplaints /></RoleGuard>} />
       </Routes>
     </AuthProvider>
   );
