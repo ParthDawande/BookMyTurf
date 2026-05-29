@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { listBookings } from '../api/bookings';
 import Header from '../components/Header';
+import CustomerNav from '../components/CustomerNav';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -139,6 +140,7 @@ export default function MyBookings() {
   return (
     <div style={{ minHeight: '100vh', background: '#f5f7fa' }}>
       <Header />
+      <CustomerNav />
       <main style={{ maxWidth: '800px', margin: '0 auto', padding: '1.5rem 1rem' }}>
 
         {/* Title + Book another */}

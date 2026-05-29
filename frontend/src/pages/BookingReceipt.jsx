@@ -2,7 +2,10 @@ import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { getBooking, cancelBooking } from '../api/bookings';
 import { getMyReview, createReview, updateReview, deleteReview } from '../api/reviews';
+import { createComplaint } from '../api/complaints';
+import { createQuery } from '../api/queries';
 import Header from '../components/Header';
+import CustomerNav from '../components/CustomerNav';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -203,6 +206,96 @@ function DeleteReviewModal({ open, onConfirm, onCancel, deleting }) {
   );
 }
 
+// ── Complaint / Query inline modal ───────────────────────────────────────────
+
+function IssueModal({ open, mode, bookingId, onClose }) {
+  const navigate  = useNavigate();
+  const [subject,     setSubject]     = useState('');
+  const [description, setDescription] = useState('');
+  const [submitting,  setSubmitting]  = useState(false);
+  const [error,       setError]       = useState(null);
+
+  if (!open) return null;
+
+  const isComplaint = mode === 'complaint';
+  const title = isComplaint ? 'Report an issue' : 'Ask a question about this booking';
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setSubmitting(true);
+    setError(null);
+    try {
+      if (isComplaint) {
+        const body = { subject, description };
+        if (bookingId) body.booking_id = Number(bookingId);
+        const res = await createComplaint(body);
+        navigate(`/customer/complaints/${res.data.complaint_id}`);
+      } else {
+        const res = await createQuery({ subject, description });
+        navigate(`/customer/queries/${res.data.query_id}`);
+      }
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to submit. Please try again.');
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 300 }}
+      onClick={onClose}>
+      <div style={{ background: '#fff', borderRadius: '10px', padding: '1.75rem',
+        maxWidth: '460px', width: '94%', boxShadow: '0 8px 32px rgba(0,0,0,0.18)' }}
+        onClick={e => e.stopPropagation()}>
+        <h3 style={{ margin: '0 0 1.25rem', color: '#1e3a5f', fontSize: '1.05rem' }}>{title}</h3>
+        <form onSubmit={handleSubmit}>
+          <div style={{ marginBottom: '0.85rem' }}>
+            <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#374151', marginBottom: '0.3rem' }}>
+              Subject <span style={{ color: '#dc2626' }}>*</span>
+            </label>
+            <input type="text" required maxLength={200} value={subject}
+              onChange={e => setSubject(e.target.value)}
+              style={{ width: '100%', padding: '0.45rem 0.65rem', borderRadius: '5px',
+                border: '1px solid #d1d5db', fontSize: '0.9rem', boxSizing: 'border-box' }} />
+          </div>
+          <div style={{ marginBottom: '1rem' }}>
+            <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#374151', marginBottom: '0.3rem' }}>
+              Description <span style={{ color: '#dc2626' }}>*</span>
+            </label>
+            <textarea required rows={4} value={description}
+              onChange={e => setDescription(e.target.value)}
+              style={{ width: '100%', padding: '0.45rem 0.65rem', borderRadius: '5px',
+                border: '1px solid #d1d5db', fontSize: '0.9rem', resize: 'vertical',
+                fontFamily: 'inherit', boxSizing: 'border-box' }} />
+          </div>
+          {error && (
+            <div style={{ background: '#fef2f2', border: '1px solid #fca5a5', color: '#b91c1c',
+              padding: '0.5rem 0.8rem', borderRadius: '5px', marginBottom: '0.75rem', fontSize: '0.83rem' }}>
+              {error}
+            </div>
+          )}
+          <div style={{ display: 'flex', gap: '0.65rem' }}>
+            <button type="submit" disabled={submitting} style={{
+              flex: 1, padding: '0.6rem',
+              background: submitting ? '#93c5fd' : (isComplaint ? '#dc2626' : '#1d4ed8'),
+              color: '#fff', border: 'none', borderRadius: '5px',
+              cursor: submitting ? 'not-allowed' : 'pointer', fontWeight: 600, fontSize: '0.9rem',
+            }}>
+              {submitting ? 'Submitting…' : `Submit ${isComplaint ? 'complaint' : 'query'}`}
+            </button>
+            <button type="button" onClick={onClose} style={{
+              padding: '0.6rem 1rem', background: 'transparent', border: '1px solid #d1d5db',
+              color: '#374151', borderRadius: '5px', cursor: 'pointer', fontSize: '0.88rem',
+            }}>
+              Cancel
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 // ── BookingReceipt ────────────────────────────────────────────────────────────
 
 export default function BookingReceipt() {
@@ -215,6 +308,9 @@ export default function BookingReceipt() {
   const [showCancel,        setShowCancel]        = useState(false);
   const [cancelling,        setCancelling]        = useState(false);
   const [cancelError,       setCancelError]       = useState(null);
+
+  // Issue modal state (complaint / query)
+  const [issueModal,        setIssueModal]        = useState(null); // null | 'complaint' | 'query'
 
   // Review state
   const [review,            setReview]            = useState(null);
@@ -348,6 +444,7 @@ export default function BookingReceipt() {
   return (
     <div style={{ minHeight: '100vh', background: '#f5f7fa' }}>
       <Header />
+      <CustomerNav />
 
       <main style={{ maxWidth: '700px', margin: '0 auto', padding: '1.5rem 1rem' }}>
         {/* Back */}
@@ -592,6 +689,23 @@ export default function BookingReceipt() {
             )}
           </>
         )}
+
+        {/* Secondary CTAs: complaints and queries — visible for all statuses */}
+        <div style={{ borderTop: '1px solid #e5e7eb', paddingTop: '0.9rem', marginTop: '0.5rem',
+          display: 'flex', gap: '1.25rem', flexWrap: 'wrap' }}>
+          <button onClick={() => setIssueModal('complaint')} style={{
+            background: 'none', border: 'none', color: '#6b7280', cursor: 'pointer',
+            fontSize: '0.82rem', padding: 0, textDecoration: 'underline',
+          }}>
+            Report an issue with this booking
+          </button>
+          <button onClick={() => setIssueModal('query')} style={{
+            background: 'none', border: 'none', color: '#6b7280', cursor: 'pointer',
+            fontSize: '0.82rem', padding: 0, textDecoration: 'underline',
+          }}>
+            Have a question about this booking?
+          </button>
+        </div>
       </main>
 
       <CancelModal
@@ -607,6 +721,13 @@ export default function BookingReceipt() {
         onConfirm={handleReviewDelete}
         onCancel={() => { setReviewDeleteModal(false); setReviewDeleting(false); }}
         deleting={reviewDeleting}
+      />
+
+      <IssueModal
+        open={issueModal !== null}
+        mode={issueModal}
+        bookingId={id}
+        onClose={() => setIssueModal(null)}
       />
     </div>
   );

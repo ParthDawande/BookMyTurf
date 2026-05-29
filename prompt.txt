@@ -1,332 +1,291 @@
-PHASE 9-customer-lifecycle-2 — Reschedule flow (all three cases
-including real Razorpay for PAYMENT) + Reviews.
+PHASE 9-customer-other — Customer complaints, queries, and
+notifications inbox. The closing piece of the customer side.
 
-Standing rules apply. Stop and report. After acceptance,
-9-customer-lifecycle is complete. Reuse Phase 0 error shape, Phase 2
-security UNCHANGED. The backend is frozen — build against existing
-endpoints. No new dependencies.
+Standing rules apply. Stop and report. After acceptance, the
+customer side is fully done and we move to 9-owner.
+Reuse Phase 0 error shape, Phase 2 security UNCHANGED. The backend
+is frozen — build against existing endpoints. No new dependencies.
 
-SCOPE: two customer-facing features.
-- /customer/bookings/:id/reschedule — single-page reschedule flow
-  with the three cases (EQUAL no payment, REFUND auto-issued,
-  PAYMENT real Razorpay charge).
-- Reviews on COMPLETED bookings — leave/edit/delete a review from
-  the receipt page.
-
-=== Locked design decisions ===
-- P1 (carried from lifecycle-1): reschedule button on receipt is
-  ENABLED when status=CONFIRMED AND earliest slot >24h in future;
-  DISABLED with inline explanation otherwise.
-- P2: explicit "old vs new" framing on the reschedule page.
-  Customer sees what they currently have alongside what they're
-  proposing.
-- P3: real Razorpay checkout.js modal for the PAYMENT case (the
-  pattern is established from 9-customer-booking — reuse it).
-- P4: review CTA on receipt visible only when status=COMPLETED.
-  If a review exists, the button switches to "View/edit your
-  review" mode.
-- P5: page-state-update IS the confirmation. No toasts. After
-  reschedule confirms, navigate back to the receipt page which
-  shows the new state.
-- (A) single-page reschedule, not stepper. Date picker + new-slot
-  selection + price-difference summary + confirm CTA all visible
-  on one screen.
+SCOPE: three customer-facing pieces.
+- Raise a complaint: from a booking receipt OR standalone form.
+- Raise a query: same shape as complaints.
+- Notifications inbox: /customer/notifications. Lists the
+  customer's notifications (will be EMPTY for customers per §5)
+  with mark-read and mark-all-read UI. This component is built
+  so it can be reused by /owner/notifications, /admin/notifications,
+  /staff/notifications later — but for now it only renders for
+  the customer portal.
 
 === Backend endpoints used (existing, do not modify) ===
-- POST /api/customer/bookings/{id}/reschedule/initiate — body:
-  new booking_date and new slots (state the exact shape via curl
-  before building UI around it). Response: action_required (NONE/
-  REFUND/PAYMENT), price_diff, refund_amount or razorpay order
-  details depending on case, reschedule_token (15-min JWT).
-- PUT /api/customer/bookings/{id}/reschedule/confirm — body: the
-  reschedule_token; for PAYMENT case also the three Razorpay
-  values. Response: updated booking detail.
-- POST /api/customer/reviews — body: booking_id, rating, comment.
-- PUT /api/customer/reviews/{id} — body: rating, comment.
-- DELETE /api/customer/reviews/{id}.
+- POST /api/customer/complaints — create complaint.
+- GET /api/customer/complaints — list customer's own complaints.
+- GET /api/customer/complaints/{id} — detail (no notes for customer
+  per 7B Q1 — internal-only).
+- POST /api/customer/queries — create query.
+- GET /api/customer/queries — list customer's own queries.
+- GET /api/customer/queries/{id} — detail.
+- GET /api/notifications — paginated, role-agnostic per 8C.
+- PUT /api/notifications/{id}/read — idempotent.
+- PUT /api/notifications/mark-all-read — bulk.
 
-Verify shapes via curl before building the UI; state what you
-observed.
+Verify shapes via curl before building if uncertain; state any
+divergence from what we discussed in framing.
 
-=== Reschedule page (/customer/bookings/:id/reschedule) ===
+=== Pages to build ===
 
-Single-page layout:
+PAGE 1: Receipt page inline "Raise a complaint" CTA
+- On /customer/bookings/{id}, add a "Report an issue with this
+  booking" link or button in a subtle location (footer or
+  secondary action area — not competing with primary actions
+  like Cancel/Reschedule/Review).
+- Visible for ALL statuses (CONFIRMED, COMPLETED, CANCELLED,
+  REFUNDED) — customers may legitimately want to complain about
+  any of them.
+- Click opens a modal OR navigates to /customer/complaints/new
+  with the booking_id pre-populated. Modal is simpler; recommend
+  modal.
+- Same "Have a question about this booking?" CTA for queries,
+  same pattern.
 
-LEFT/TOP — "Current booking" panel (read-only summary):
-- Turf, sub-court, current date, current slots, current total.
-- "Cancel reschedule" link → back to receipt unchanged.
+PAGE 2: /customer/complaints/new — standalone complaint form
+- Form fields per the 7B backend contract: subject (required),
+  description (required), booking_id (optional dropdown of
+  customer's CONFIRMED/COMPLETED/CANCELLED/REFUNDED bookings
+  — exclude OPEN/PENDING since they're not relevant for
+  complaints).
+- Submit → POST /api/customer/complaints. On 201 → navigate to
+  /customer/complaints/{id} (or back to a list with success
+  banner — pick one and state).
+- Errors: backend validation errors surfaced via the existing
+  pattern.
 
-RIGHT/BOTTOM — "New booking" panel (interactive):
-- Date picker. Default = current booking_date. Selecting a new
-  date triggers an availability fetch for that date.
-- Availability grid for the SAME sub-court (cross-sub-court
-  reschedule is NOT supported per the 6C Q1 decision). Use the
-  same multi-slot selection from 9-customer-booking: free/taken/
-  selected visual states, contiguous-only enforcement (choice a).
-- New total calculated client-side: selected slots count × rate.
-- Price-difference summary, live-updated as selection changes:
-  - "No price change" if diff == 0.
-  - "You'll be refunded ₹X" if diff < 0.
-  - "Additional ₹X to pay" if diff > 0.
-- "Continue" CTA, disabled if no slots selected or selection is
-  the same as the current booking (no-op reschedule).
+PAGE 3: /customer/queries/new — standalone query form
+- Same shape as complaints/new. Subject, description, optional
+  booking_id dropdown.
+- Submit → POST /api/customer/queries. On 201 → navigate to
+  /customer/queries/{id}.
 
-The "Continue" CTA fires the initiate call. From the response's
-`action_required` field, the next step diverges:
+PAGE 4: /customer/complaints — list of customer's complaints
+- Paginated. Status filter (All, OPEN, IN_PROGRESS, RESOLVED).
+- Card per complaint: subject, status badge, created date,
+  related booking (if booking_id is set, show "Re: Booking #X
+  at Turf Y"; if null, show "General complaint").
+- Empty state: "You haven't raised any complaints. If something's
+  wrong, you can report it from your booking receipt or
+  [raise a general complaint]."
+- "Raise a complaint" CTA somewhere visible → /customer/
+  complaints/new.
 
-CASE NONE (equal price):
-- Confirmation modal: "Reschedule confirmed?" with old vs new
-  summary and a "Confirm" CTA.
-- Click → PUT /reschedule/confirm with the token. No Razorpay.
-- 200 → navigate to /customer/bookings/{id}. The receipt
-  reflects the new slots/date.
-- Errors per the mapping below.
+PAGE 5: /customer/complaints/{id} — complaint detail
+- Subject, description, status, created date.
+- Related booking link if booking_id set.
+- NO notes shown (7B Q1 — internal-only).
+- A small "Status: OPEN — we'll respond soon" or similar
+  informational text per status. For RESOLVED status: "Status:
+  RESOLVED on [date]" using the resolved_at column from
+  Phase 7C-accepted schema deviation.
+- 404 (cross-customer) → "Complaint not found" page.
 
-CASE REFUND (price decrease):
-- Confirmation modal: "Confirm reschedule? You'll be refunded
-  ₹X.XX." with old vs new + the refund amount.
-- Click → PUT /reschedule/confirm with the token. No Razorpay.
-- 200 → backend issues the partial refund, returns updated
-  booking. Navigate to receipt → shows new slots/date + the
-  partial refund visible in the refunds array.
-- Errors per the mapping.
+PAGE 6: /customer/queries — list of customer's queries
+- Same shape as complaints list. Status filter (All, OPEN,
+  IN_PROGRESS, RESOLVED).
 
-CASE PAYMENT (price increase):
-- Review modal: "Pay ₹X additional to reschedule?" with old vs
-  new + the additional charge. CTA: "Pay ₹X.XX now."
-- Click → open Razorpay checkout.js with the initiate
-  response's order_id, key_id, amount. Same SDK loader pattern
-  from 9-customer-booking.
-- Razorpay success callback → PUT /reschedule/confirm with the
-  token AND the three Razorpay values.
-- 200 → navigate to receipt. Now shows: new slots/date, total
-  reflecting the increase, payments array with BOTH the
-  original and the additional charge (the multi-payment audit
-  trail that lifecycle-1 already renders).
-- Razorpay dismiss → "Payment cancelled" banner, selection
-  intact, no confirm call fired.
-- Errors per the mapping (race-after-payment 409, etc.).
+PAGE 7: /customer/queries/{id} — query detail
+- Same shape as complaint detail. No notes shown. resolved_at
+  for RESOLVED status.
 
-=== Error mapping for reschedule (state the table in your report) ===
-| Backend response on confirm | Frontend behavior |
-|---|---|
-| 200 OK | Navigate to /customer/bookings/{id} (receipt updated) |
-| 400 invalid token (expired or tampered) | "Reschedule session expired. Please start again." → back to receipt |
-| 409 pricing-change | "Rates changed since you started. Please review and try again." → back to /reschedule with same date selected (refetch availability/pricing) |
-| 409 slot-race | "One of your selected slots was just taken. Please pick again." → stay on /reschedule, refetch availability for the date |
-| 502 refund failure (REFUND case) | "Reschedule failed. Your booking is unchanged. Please try again." (same shape as cancel-502 from lifecycle-1) |
-| Other 4xx/5xx | "Something went wrong. Please try again." |
+PAGE 8: /customer/notifications — notifications inbox
+- Paginated list of the calling user's notifications.
+- Each item: notification type (with friendly label — e.g.,
+  "BOOKING_CANCELLED" → "Your booking was cancelled" or
+  whatever maps appropriately — though note that for CUSTOMERS
+  per §5, no notifications ever get created, so this list is
+  always empty for customers; the component is built ready for
+  population when owner/admin/staff use it later).
+- For empty case (the expected customer state): clean empty-
+  state UI: "No notifications yet."
+- For populated case (forward-prepared for other roles):
+  - Each item shows type, message, created_at, is_read state
+    (visual difference between read and unread — bold unread,
+    normal weight read).
+  - Click an unread notification → PUT
+    /api/notifications/{id}/read → state updates immediately.
+  - "Mark all as read" button visible only if there are unread
+    items → PUT /api/notifications/mark-all-read → state
+    updates immediately.
+- Filterable by is_read (All / Unread / Read) per 8C's
+  is_read filter support.
 
-For the PAYMENT case specifically, race-after-payment is the 409 the customer needs to understand: "This slot was taken after you paid. Your additional payment has been refunded — please pick a different slot." Same shape as 9-customer-booking's 409.
+=== Navigation updates ===
+- Add /customer/complaints, /customer/queries, /customer/
+  notifications to the customer portal's navigation. The
+  customer-portal nav was minimal in 9-foundation; this is the
+  right time to expand it.
+- Recommended nav structure on /customer/* pages: a horizontal
+  or sidebar nav with items: My Bookings, Notifications,
+  Complaints, Queries. State your nav approach.
 
-=== Reviews on COMPLETED bookings ===
+=== Type-label mapping for notifications ===
+For each NotificationType enum value the customer might see
+(in this sub-phase: probably never, but build it correctly for
+forward use), provide a friendly label. Example mapping:
+- BOOKING_CANCELLED → "Booking cancelled"
+- BOOKING_RESCHEDULED → "Booking rescheduled"
+- TURF_APPROVED → "Turf approved"
+- COMPLAINT_ASSIGNED → "Complaint assigned to you"
+- PAYOUT_RELEASED → "Payout released"
+- etc.
 
-On the receipt page (lifecycle-1), the "Leave a review" placeholder
-button only appears for COMPLETED bookings. This sub-phase
-implements the actual form.
-
-Review widget (modal or inline expandable section):
-- Star rating: 5-star selector (click to set, hover to preview).
-- Comment textarea (note: backend may require non-empty — let the
-  backend's validation drive; show backend error if so).
-- Submit → POST /api/customer/reviews. On 200, the receipt
-  refetches and shows the review attached.
-
-If a review exists for the booking:
-- The button on the receipt changes to "View/edit your review."
-- Clicking opens the same widget pre-filled with the existing
-  rating + comment.
-- Submit → PUT /api/customer/reviews/{id}.
-- Delete button (with confirmation modal: "Delete your review?
-  This cannot be undone.") → DELETE → on success, refetch and
-  the button reverts to "Leave a review."
-
-The review shows on the receipt page in a small "Your review"
-section, displaying the rating, comment, posted-on date. If an
-owner reply exists for this review (from the owner-reply feature
-in 7A), show it below the review with "Owner reply:" prefix.
+State your label mapping. For any type not in the mapping,
+default to the raw type string (defensive — frontend doesn't
+break on unknown types).
 
 === Carried-forward contracts to enforce ===
 
-1. Razorpay SDK reload: the loader from 9-customer-booking
-   (utils/razorpay.js) is reused; the SDK loads once per session
-   and is reused for both bookings and reschedule-PAYMENT.
-2. Contiguous-only slot selection (lifecycle-1's pattern carries
-   over).
-3. Multi-payment receipt rendering from lifecycle-1 — the
-   PAYMENT reschedule will create a booking with 2 payments rows,
-   and the receipt will render both per the 6A receipt fix.
-4. Backend's reschedule_token has a 15-minute expiry (6C-i).
-   The frontend shouldn't try to refresh or extend it; if it
-   expires, the customer starts over.
-5. No customer-facing notifications. P5 page-update-as-confirmation.
+1. Customer never sees the notes array on complaints/queries
+   (7B Q1 — internal-only). Verify by inspecting the response
+   for the customer detail endpoint and confirming no notes
+   array is shown.
+2. resolved_at column from Phase 7B/7C schema deviation is
+   surfaced in the detail page when status=RESOLVED.
+3. The customer-facing notifications list is structurally empty
+   per §5 — verify this by checking the response.
+4. The notifications component is reusable; later sub-phases
+   (9-owner, 9-admin, 9-staff) will mount it at their own
+   /<role>/notifications routes and it'll display the populated
+   data correctly.
 
 === Do NOT in this sub-phase ===
-- No cross-sub-court reschedule (locked at 6C Q1).
-- No reschedule on COMPLETED, CANCELLED, REFUNDED bookings.
-- No "reschedule history" view (out of scope — schema
-  doesn't retain slot history per the 6C Q3 decision).
+- No edit or delete on complaints/queries (the spec doesn't
+  permit it — customers create-only).
+- No notes display on customer-side detail pages.
+- No staff/admin views of complaints/queries (those are 9-staff
+  and 9-admin).
 - No backend changes.
 
-=== VERIFICATION via Playwright + real Razorpay test payment ===
+=== VERIFICATION via Playwright + dev server ===
 
-Same standard as 9-customer-booking. State URLs, network calls,
-visible results. The 9-customer-booking lesson on headless
-Razorpay applies — the PAYMENT case's modal may not be fully
-drivable via headless; use HMAC-valid synthetic confirm as
-backup for the cryptographic side and verify the Razorpay
-modal opens via DOM/iframe presence.
+Same standard. State URLs, network calls, visible results. Use
+existing customer accounts (testcust@verify.test, customer 47,
+etc.) and the accumulated test bookings.
 
-You may need to stage one or two fresh CONFIRMED bookings to
-run reschedule scenarios on (since each reschedule changes
-booking state, can't reuse). The existing bookings 33 (REFUNDED
-from earlier this conversation) and 34 (REFUNDED from lifecycle-1
-test 5d) can't be rescheduled. Make fresh bookings as needed
-via the 9-customer-booking flow.
+1. Files created/modified; the new routes added to App.jsx. State
+   the navigation approach for /customer/*. State the
+   notification-type label mapping.
 
-1. Files created/modified. State the route addition for
-   /customer/bookings/:id/reschedule.
+2. COMPLAINT FROM RECEIPT:
+   a. Log in as customer 47. Navigate to /customer/bookings/33
+      (or whatever booking is currently viewable for this
+      customer).
+   b. Click "Report an issue with this booking" (or equivalent).
+      Modal or page opens. State which.
+   c. Fill subject + description. Submit. Network: POST
+      /api/customer/complaints with snake_case body including
+      booking_id. Show body.
+   d. 201 response. Navigate (or display success). State
+      destination.
+   e. Raw SELECT: complaints row with customer_id=47,
+      booking_id=33, status=OPEN.
 
-2. RESCHEDULE PAGE — log in as customer 47:
-   a. Stage or use a CONFIRMED booking with slots >24h away.
-      State booking id, current slots, current total.
-   b. Navigate to its receipt. Click "Reschedule" button.
-      Network should NOT fire yet (page loads with current
-      booking state).
-   c. /customer/bookings/{id}/reschedule renders with the
-      "Current" panel showing booking details and an empty
-      "New" panel with date picker defaulted to current date.
+3. STANDALONE COMPLAINT FORM:
+   a. Navigate to /customer/complaints/new directly.
+   b. The booking_id dropdown shows the customer's eligible
+      bookings (CONFIRMED/COMPLETED/CANCELLED/REFUNDED).
+      State the count.
+   c. Submit a complaint WITHOUT selecting a booking. Network:
+      POST /api/customer/complaints with no booking_id (null).
+      201 response.
+   d. Raw SELECT: complaints row with customer_id=47,
+      booking_id=NULL, status=OPEN. The 7B Q2 schema deviation
+      (booking_id nullable on complaints) is exercised here.
 
-3. SLOT SELECTION on the new panel:
-   a. Pick a NEW date (different from current). Network: GET
-      /api/customer/turfs/{turf_id}/availability?date=...
-      (or /api/public/turfs/.../availability — state which).
-      Availability grid renders for the sub-court.
-   b. Select 2 contiguous free slots. Selection visualizes,
-      "New total: ₹X" updates, price-difference summary updates.
-      State the three sub-cases on a single setup:
-      - 2 slots same rate as current = EQUAL: "No price change"
-        + "Continue" CTA.
-      - Fewer slots = REFUND: "You'll be refunded ₹X" + CTA.
-      - More slots = PAYMENT: "Additional ₹X to pay" + CTA.
-      You may need to test with 3 different selections in
-      sequence to surface all three cases on the same booking.
+4. COMPLAINTS LIST:
+   a. /customer/complaints. Network: GET. Show response shape.
+   b. The two complaints from items 2 and 3 visible. State the
+      visual differences: one shows "Re: Booking #33 at Turf X",
+      the other shows "General complaint" (or whatever label
+      you used for null booking_id).
+   c. Filter by status=OPEN, IN_PROGRESS, RESOLVED. URL
+      updates. (If no test data exists for IN_PROGRESS or
+      RESOLVED yet, state "empty state shown for this filter.")
 
-4. CASE EQUAL — real confirm:
-   a. Select slots producing zero price diff (same number of
-      slots at same rate as current booking, different times).
-   b. Click "Continue". Network: POST
-      /api/customer/bookings/{id}/reschedule/initiate (snake_case
-      body). Response: action_required=NONE, reschedule_token.
-   c. Confirmation modal appears with old vs new. Click "Confirm".
-      Network: PUT
-      /api/customer/bookings/{id}/reschedule/confirm with the
-      token. Response 200.
-   d. Navigate back to /customer/bookings/{id}. Receipt now
-      shows the new slots/date. Status still CONFIRMED.
-   e. Raw SELECT confirming: booking row's total_amount
-      unchanged, booking_date updated if applicable,
-      booking_slots replaced (count) — same as 6C-ii-2.
+5. COMPLAINT DETAIL:
+   a. Click into one of the complaints. /customer/complaints/{id}.
+      Network: GET /api/customer/complaints/{id}.
+   b. Show response shape. State EXPLICITLY: the response does
+      NOT include a notes array (carried-forward 7B Q1 internal-
+      only rule). If the backend's response does include a notes
+      array (which would be a backend leak), state that and
+      strip it client-side.
+   c. Visible content: subject, description, status, related
+      booking link, no notes section.
+   d. If a RESOLVED complaint exists (stage one via direct DB
+      UPDATE setting status='RESOLVED' and resolved_at=NOW()
+      on a complaint, then refetch), the detail page shows
+      "Resolved on [date]". State the date display.
 
-5. CASE REFUND — real partial refund:
-   a. Stage another fresh CONFIRMED booking (or re-stage one
-      after restoring it to >24h state).
-   b. Select FEWER slots so price_diff < 0. Continue → initiate
-      returns action_required=REFUND with refund_amount.
-   c. Confirmation modal shows refund amount. Confirm → PUT
-      /reschedule/confirm. Response 200, REAL Razorpay refund
-      fires. Show:
-      - Razorpay live state: amount_refunded equals the partial
-        refund amount, refund_status=partial.
-      - DB raw SELECT: booking status STILL CONFIRMED (NOT
-        REFUNDED — DECISIONS §3), total_amount reduced, refunds
-        row with booking_id NOT NULL, status=SUCCESS, amount=
-        partial.
-   d. Receipt page shows new slots/date, reduced total, and
-      the partial refund visible in the refunds array.
+6. CROSS-CUSTOMER 404 on complaint detail:
+   a. Customer A creates complaint 1. Customer B logs in,
+      navigates to /customer/complaints/1 (using A's
+      complaint id). Network: 404. UI shows "Complaint not
+      found".
 
-6. CASE PAYMENT — real additional Razorpay payment:
-   a. Stage another fresh CONFIRMED booking.
-   b. Select MORE slots so price_diff > 0. Continue → initiate
-      returns action_required=PAYMENT with razorpay_order_id +
-      key_id + amount (the price_diff in paise) +
-      reschedule_token.
-   c. Review modal shows additional amount. Click "Pay ₹X now."
-      Razorpay checkout.js opens with the order. Show that the
-      modal opened (DOM/iframe assertion).
-   d. Complete payment with test card 5267318187975449 + OTP
-      111111.
-      - In headless mode this may not fully drive the modal;
-        fall back to HMAC-valid synthetic confirm (the pattern
-        from 9-customer-booking). State which approach used.
-   e. Razorpay success callback → PUT /reschedule/confirm with
-      the three Razorpay values + the token. Response 200.
-   f. Navigate to receipt. The booking now has 2 payments
-      visible in the payments array (original + additional
-      charge), new slots, new total reflecting the increase.
-   g. DB raw SELECT confirming: 2 payments rows for this
-      booking, both with booking_id NOT NULL, both SUCCESS;
-      original amount + additional amount; commission
-      recomputed; payout amount updated.
+7. QUERIES — repeat steps 2-6 for queries:
+   - From-booking and standalone creation.
+   - List.
+   - Detail (no notes, resolved_at if applicable).
+   - Cross-customer 404.
 
-7. RESCHEDULE GUARDS:
-   a. Reschedule button disabled when slot is within 24h: same
-      verification as lifecycle-1 test 6.
-   b. Reschedule button absent on COMPLETED/REFUNDED/CANCELLED
-      bookings.
+8. NOTIFICATIONS INBOX (empty for customers per §5):
+   a. /customer/notifications. Network: GET /api/notifications.
+   b. Response: empty list (customers have zero notifications).
+   c. UI shows the empty state: "No notifications yet."
+   d. The "Mark all as read" button is NOT visible (no unread
+      items).
+   e. The is_read filter is visible but with empty results
+      regardless of selection.
 
-8. RESCHEDULE ERRORS:
-   a. 409 race-after-payment (if stageable): force a race
-      between initiate and confirm in the PAYMENT case. Show
-      the "additional payment refunded — please pick again"
-      message and the page state still showing the original
-      booking unchanged. If not stageable cleanly, document
-      that the code path exists per the error mapping table
-      and rely on backend 6C-iii-2 verification.
-   b. 400 expired token: select slots, click Continue (initiate
-      succeeds), wait >15 minutes, then click Confirm. The PUT
-      returns 400 invalid-token. Show the "session expired"
-      message and the redirect back to receipt. (If 15-min wait
-      is impractical, stage by setting
-      app.reschedule.token-expiry-seconds=10 in
-      application-local, then test, then restore. State the
-      flag wrangling.)
+9. NOTIFICATIONS INBOX populated (forward verification):
+   This step exercises the component's populated state by
+   logging in as a user with real notifications, even though
+   that's not the customer's surface. The owner accounts have
+   notifications from earlier phases. Log in as ownera5a@bmt.test:
+   a. Navigate to /owner/notifications (the route may not exist
+      yet — 9-owner sub-phase will add it formally, but the
+      notifications component should be reusable). If the route
+      doesn't exist, mount the component manually at a temporary
+      route OR test via console + component props. State your
+      approach.
+   b. The owner's notifications appear: BOOKING_CANCELLED,
+      BOOKING_RESCHEDULED, etc.
+   c. Click an unread notification. Network: PUT
+      /api/notifications/{id}/read with the right id. Response
+      200. The UI updates immediately (the item visually
+      transitions from bold/unread to normal/read).
+   d. Click "Mark all as read." Network: PUT
+      /api/notifications/mark-all-read. Response: marked_count.
+      All items now show as read.
+   e. Refresh the page. The read state persists (proves it's
+      backed by real PUT calls, not just client state).
+   f. Type-label mapping in action: at least 2 different
+      notification types show their friendly labels (not the raw
+      enum string). State which ones you saw.
 
-9. REVIEWS — COMPLETED booking:
-   a. Find or stage a COMPLETED booking owned by a customer
-      with known credentials. Stage by direct DB UPDATE
-      changing booking status to COMPLETED on a real booking.
-      State which booking and customer used.
-   b. Receipt page now shows "Leave a review" button. Click.
-      Review form renders.
-   c. Submit a 4-star review with a comment. Network: POST
-      /api/customer/reviews (snake_case body). 200.
-   d. Receipt refetches, "Your review" section shows the
-      rating + comment + posted-on date.
-   e. Edit review: change to 5 stars, modify comment. PUT
-      /api/customer/reviews/{id}. Response 200. Receipt
-      refetches.
-   f. Delete review: confirmation modal → DELETE. Receipt
-      refetches, "Your review" section gone, button back to
-      "Leave a review."
-   g. DB raw SELECT: review row gone, turf's avg_rating and
-      review_count recomputed per 7A's contract.
+10. NAVIGATION:
+    a. From /customer/bookings, the navigation includes My
+       Bookings (active), Notifications, Complaints, Queries.
+    b. Click each and verify the right route loads.
 
-10. REVIEW GUARDS:
-    a. CONFIRMED booking: no review button. Show.
-    b. Try POST /api/customer/reviews with a CONFIRMED
-       booking_id → backend returns 400 (the 7A status
-       guard). State the error display.
-    c. Customer can't see another customer's review's edit/
-       delete (the buttons only appear on the customer's own
-       review on their own booking).
+11. ANONYMOUS:
+    a. Anonymous visits /customer/complaints → redirected to
+       /login (role guard).
+    b. Same for queries, notifications.
 
-11. NETWORK PAYLOADS: all bodies + params snake_case throughout.
+12. NETWORK PAYLOADS: all snake_case throughout.
 
-12. P5 invariant: across all reschedule and review tests, no
-    customer-facing notifications created. State the
-    notifications count delta — should be only OWNER-directed
-    BOOKING_RESCHEDULED rows, no customer rows.
+13. §5 EXPLICIT VERIFICATION: the customer's notification list
+    is empty. State the DB-side query: SELECT COUNT(*) FROM
+    notifications WHERE user_id = (customer 47's user_id). Should
+    be 0.
 
-9-customer-lifecycle is fully complete after this sub-phase. Do
-not begin the next sub-phase.
+9-customer-other complete. Customer side is fully done.
