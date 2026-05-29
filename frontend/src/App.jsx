@@ -24,6 +24,9 @@ import NotificationsPage from './pages/NotificationsPage';
 import OwnerDashboard  from './pages/OwnerDashboard';
 import OwnerStub       from './pages/OwnerStub';
 import OwnerNav        from './components/OwnerNav';
+import OwnerTurfList   from './pages/OwnerTurfList';
+import OwnerTurfNew    from './pages/OwnerTurfNew';
+import OwnerTurfDetail from './pages/OwnerTurfDetail';
 
 function CG({ children }) {
   return <RoleGuard role="CUSTOMER">{children}</RoleGuard>;
@@ -62,7 +65,9 @@ export default function App() {
         <Route path="/owner"              element={<Navigate to="/owner/dashboard" replace />} />
         <Route path="/owner/dashboard"    element={<OG><OwnerDashboard /></OG>} />
         <Route path="/owner/notifications" element={<OG><NotificationsPage Nav={OwnerNav} /></OG>} />
-        <Route path="/owner/turfs"        element={<OG><OwnerStub title="My Turfs" coming="Coming in 9-owner-turf-management." /></OG>} />
+        <Route path="/owner/turfs/new"     element={<OG><OwnerTurfNew /></OG>} />
+        <Route path="/owner/turfs/:id"    element={<OG><OwnerTurfDetail /></OG>} />
+        <Route path="/owner/turfs"        element={<OG><OwnerTurfList /></OG>} />
         <Route path="/owner/payouts"      element={<OG><OwnerStub title="Payouts" coming="Coming in 9-owner-finance-and-engagement." /></OG>} />
         <Route path="/owner/reviews"      element={<OG><OwnerStub title="Reviews" coming="Coming in 9-owner-finance-and-engagement." /></OG>} />
         <Route path="/owner/*"            element={<OG><OwnerDashboard /></OG>} />
