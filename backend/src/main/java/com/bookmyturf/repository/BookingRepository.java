@@ -9,6 +9,8 @@ import org.springframework.data.repository.query.Param;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.Optional;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 
 public interface BookingRepository extends JpaRepository<Booking, Long> {
 
@@ -77,4 +79,17 @@ public interface BookingRepository extends JpaRepository<Booking, Long> {
     List<Object[]> revenuePlatformWide(@Param("statuses") List<BookingStatus> statuses,
                                         @Param("fromDate") LocalDate fromDate,
                                         @Param("toDate") LocalDate toDate);
+
+    // Customer booking list — paginated, optional status filter.
+    @Query("SELECT b FROM Booking b WHERE b.customer.id = :customerId ORDER BY b.createdAt DESC")
+    Page<Booking> findByCustomerId(@Param("customerId") Long customerId, Pageable pageable);
+
+    @Query("SELECT b FROM Booking b WHERE b.customer.id = :customerId AND b.status = :status ORDER BY b.createdAt DESC")
+    Page<Booking> findByCustomerIdAndStatus(@Param("customerId") Long customerId,
+                                            @Param("status") BookingStatus status,
+                                            Pageable pageable);
+
+    // Customer booking detail — ownership-checked (booking not found → 404, no leak).
+    @Query("SELECT b FROM Booking b WHERE b.id = :id AND b.customer.id = :customerId")
+    Optional<Booking> findByIdAndCustomerId(@Param("id") Long id, @Param("customerId") Long customerId);
 }

@@ -1,5 +1,6 @@
 package com.bookmyturf.service;
 
+import com.bookmyturf.dto.customer.BookingListResponse;
 import com.bookmyturf.dto.customer.CancelBookingResponse;
 import com.bookmyturf.dto.customer.ConfirmBookingRequest;
 import com.bookmyturf.dto.customer.ConfirmBookingResponse;
@@ -31,6 +32,8 @@ import org.springframework.web.server.ResponseStatusException;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Instant;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
@@ -114,6 +117,56 @@ public class BookingService {
         this.razorpayClient = razorpayClient;
         this.raceRefundRecoveryService = raceRefundRecoveryService;
         this.jwtUtil = jwtUtil;
+    }
+
+    // -------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // Endpoint 0a: list — paginated bookings for the authenticated customer
+    // -------------------------------------------------------------------------
+
+    public BookingListResponse listBookings(User customer, String status, int page, int size) {
+        int effectiveSize = Math.min(Math.max(size, 1), 50);
+        int effectivePage = Math.max(page, 0);
+        PageRequest pageable = PageRequest.of(effectivePage, effectiveSize);
+
+        Page<Booking> bookingPage;
+        if (status != null && !status.isBlank()) {
+            BookingStatus bs;
+            try { bs = BookingStatus.valueOf(status.toUpperCase()); }
+            catch (IllegalArgumentException e) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid status filter");
+            }
+            bookingPage = bookingRepository.findByCustomerIdAndStatus(customer.getId(), bs, pageable);
+        } else {
+            bookingPage = bookingRepository.findByCustomerId(customer.getId(), pageable);
+        }
+
+        List<BookingListResponse.BookingListItem> items = bookingPage.getContent().stream().map(b -> {
+            List<BookingSlot> slots = bookingSlotRepository.findByBookingId(b.getId())
+                    .stream().sorted(Comparator.comparing(BookingSlot::getStartTime))
+                    .collect(Collectors.toList());
+            String first = slots.isEmpty() ? null : TIME_FMT.format(slots.get(0).getStartTime());
+            String last  = slots.isEmpty() ? null : TIME_FMT.format(slots.get(slots.size() - 1).getEndTime());
+            SubCourt sc = b.getSubCourt();
+            return new BookingListResponse.BookingListItem(
+                    b.getId(), b.getStatus().name(),
+                    b.getCreatedAt() != null ? b.getCreatedAt().toString() : null,
+                    sc.getTurf().getId(), sc.getTurf().getName(), sc.getName(),
+                    b.getBookingDate().toString(), first, last, b.getTotalAmount());
+        }).collect(Collectors.toList());
+
+        return new BookingListResponse(effectivePage, effectiveSize,
+                bookingPage.getTotalElements(), bookingPage.getTotalPages(), items);
+    }
+
+    // -------------------------------------------------------------------------
+    // Endpoint 0b: get booking — ownership-checked, returns full receipt shape
+    // -------------------------------------------------------------------------
+
+    public ReceiptResponse getBooking(User customer, Long bookingId) {
+        bookingRepository.findByIdAndCustomerId(bookingId, customer.getId())
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Booking not found"));
+        return getReceipt(customer, bookingId);
     }
 
     // -------------------------------------------------------------------------

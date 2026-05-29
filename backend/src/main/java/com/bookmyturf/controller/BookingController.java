@@ -1,5 +1,6 @@
 package com.bookmyturf.controller;
 
+import com.bookmyturf.dto.customer.BookingListResponse;
 import com.bookmyturf.dto.customer.CancelBookingResponse;
 import com.bookmyturf.dto.customer.ConfirmBookingRequest;
 import com.bookmyturf.dto.customer.ConfirmBookingResponse;
@@ -26,6 +27,22 @@ public class BookingController {
 
     public BookingController(BookingService bookingService) {
         this.bookingService = bookingService;
+    }
+
+    @GetMapping("")
+    public ResponseEntity<BookingListResponse> list(
+            @AuthenticationPrincipal User user,
+            @RequestParam(required = false) String status,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "10") int size) {
+        return ResponseEntity.ok(bookingService.listBookings(user, status, page, size));
+    }
+
+    @GetMapping("/{id}")
+    public ResponseEntity<ReceiptResponse> getBooking(
+            @AuthenticationPrincipal User user,
+            @PathVariable Long id) {
+        return ResponseEntity.ok(bookingService.getBooking(user, id));
     }
 
     @PostMapping("/initiate")

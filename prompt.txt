@@ -1,286 +1,313 @@
-PHASE 9-customer-booking — Real Razorpay checkout.js integration:
-multi-slot selection on the availability grid, pre-checkout review,
-modal payment, success/error handling, navigation to receipt.
+PHASE 9-customer-lifecycle-1 — My Bookings list + full Receipt page
++ Cancel flow.
 
-Standing rules apply. Stop and report. Do NOT start the next
-sub-phase. The backend is frozen at this point (Phase 5/6/8D);
-build against existing endpoints. Real Razorpay test-mode flow
-via the real checkout.js modal (replacing the headless test
-recipe used during backend testing).
+Standing rules apply. Stop and report. Do NOT start
+9-customer-lifecycle-2 (reschedule + reviews). Reuse Phase 0 error
+shape, Phase 2 security UNCHANGED. The backend is frozen — build
+against existing endpoints. No new dependencies.
 
-SCOPE: the end-to-end booking flow for an authenticated customer.
-Three things land in this sub-phase:
-- Multi-slot selection on the existing availability grid in
-  TurfDetail (with contiguous-only enforcement).
-- A review step (page or modal) showing booking details + total,
-  with "Pay now" CTA.
-- Real Razorpay checkout.js modal integration: load the SDK,
-  instantiate with backend's order data, handle success/dismiss
-  callbacks, POST confirm to the backend, navigate to receipt
-  on success.
+SCOPE: three customer-facing features around viewing and cancelling
+their bookings.
+- /customer/bookings — paginated list of customer's own bookings.
+- /customer/bookings/:id — full receipt page (replaces 9-customer-
+  booking's placeholder).
+- Cancel flow — confirmation modal from the receipt, calls DELETE,
+  page reflects new state.
 
 === Locked design decisions ===
-- Q1: multi-slot selection. Customer clicks free slots to toggle
-  selection; selection is reflected visually (selected slots
-  highlighted distinctly from free/taken); a running total
-  appears as slots are selected.
-- Q1 sub-rule (contiguous-only): selected slots MUST be a
-  contiguous block within the same sub-court. v1 enforcement:
-  if a customer clicks a non-adjacent slot, EITHER (a) replace
-  the current selection with the new slot OR (b) show an inline
-  message "Slots must be contiguous; pick adjacent slots."
-  Implementation choice (a) is the simpler/cleaner UX and is
-  the recommended v1 behavior. State which you implemented.
-- Cross-sub-court selection: NOT allowed. Selection is scoped
-  to one sub-court at a time. Clicking a slot on a different
-  sub-court replaces the selection.
-- Q2: review step between slot selection and Razorpay. This can
-  be either a separate page (/booking/review with state passed
-  via router) or a modal overlay on the detail page. Modal is
-  simpler v1; recommend modal.
+- P1: cancel button is ALWAYS VISIBLE on CONFIRMED bookings, but
+  DISABLED with an inline explanation when outside the 24h window.
+  Same approach will apply to reschedule button in lifecycle-2.
+- P5: page state update after cancel IS the customer's confirmation.
+  No customer-facing notification, no toast on top of the page
+  update. The page-state-change is the confirmation.
 
 === Backend endpoints used (existing, do not modify) ===
-- POST /api/customer/bookings/initiate — body includes sub_court_id,
-  booking_date (YYYY-MM-DD), slots array (each slot has start_time
-  and end_time as HH:MM strings, or whatever shape the existing
-  endpoint accepts — match what 5B verified). Response: razorpay_
-  order_id, razorpay_key_id, amount_in_paise (or whatever field
-  names the backend returns; state the exact shape observed).
-- POST /api/customer/bookings/confirm — body: razorpay_order_id,
-  razorpay_payment_id, razorpay_signature. Response on success
-  includes booking_id and status; on failure returns 409/502/
-  400 per the carried-forward error contract.
+- GET /api/customer/bookings (paginated list, snake_case query
+  params per build convention: ?page=&size=&status=).
+- GET /api/customer/bookings/{id} (full receipt — uses the 6A
+  receipt-fix shape with payments PLURAL array, refunds array).
+- DELETE /api/customer/bookings/{id} (cancel-with-refund per 6B).
 
-=== Slot selection UI (in TurfDetail) ===
-On the existing availability grid (one sub-court at a time):
-- Free slot: green, clickable.
-- Taken slot: grey, not clickable, has "Taken" label.
-- Selected slot: distinct color (e.g., blue or a brighter green
-  with a checkmark), clickable to deselect.
-- A persistent summary panel near the grid (or below it on mobile):
-  "{n} slot(s) selected: {start}-{end} · ₹{total}" with a "Book
-  now" CTA. The CTA is disabled when 0 slots are selected.
-- Total = number of selected slots × sub_court.hourly_rate.
-  Display as ₹X.XX with two decimals.
+State the exact response shapes you observe from each (the
+fields you depend on), since this informs the frontend's rendering.
 
-Contiguous-only behavior (recommended choice (a)):
-- Currently selected slots form a contiguous block (or empty).
-- Click a free slot adjacent to the current block → extends the
-  block.
-- Click a slot that's currently selected → if it's an endpoint
-  of the block, shrink the block from that end; if it's interior,
-  shrink from the clicked endpoint.
-- Click a free slot NOT adjacent to the current block → REPLACE
-  the current selection with just that slot.
-- Click a slot on a different sub-court → REPLACE the selection.
-- State the exact rules you implemented.
+=== Page 1: My Bookings list (/customer/bookings) ===
 
-=== Review step (modal recommended) ===
-On "Book now" click, the modal/page shows:
-- Turf name and city.
-- Sub-court name and sport.
-- Date (formatted human-readable, e.g., "Saturday, June 27, 2026").
-- Slots (formatted as a range: "9:00 AM – 11:00 AM" for 2
-  contiguous slots, even though the wire format is HH:MM).
-- Total amount: ₹X.XX.
-- A "Pay ₹X.XX now" primary CTA.
-- A "Cancel" secondary CTA that returns to the detail page with
-  the selection intact.
+Layout:
+- Header (existing Header.jsx with user email + logout).
+- Page title: "My Bookings."
+- Status filter: dropdown with options "All", "CONFIRMED",
+  "COMPLETED", "CANCELLED", "REFUNDED". Default "All".
+  Filter changes the ?status= URL param and refetches.
+- Booking list: card per booking with:
+  - Turf name (clickable → /turfs/{turf_id} for detail).
+  - Sub-court name + sport.
+  - Booking date (human-readable: "Saturday, June 27, 2026").
+  - Slot time range (first slot start → last slot end:
+    "9:00 AM – 11:00 AM").
+  - Status badge with visual treatment per status (color-coded:
+    CONFIRMED green, COMPLETED neutral, CANCELLED grey-strike,
+    REFUNDED amber/red — use the design tokens).
+  - Total amount.
+  - "View details" CTA → /customer/bookings/{id}.
+- Pagination controls at the bottom.
+- "Book another" CTA somewhere visible → /turfs.
 
-Clicking "Pay" calls the booking-initiate flow.
+States:
+- Loading: simple "Loading..." or spinner using the existing pattern.
+- Empty (no bookings): "You haven't made any bookings yet. Browse
+  turfs →" with the browse CTA. Required for v1.
+- Error: error message via the existing ErrorBanner/useApiError
+  pattern.
 
-=== Razorpay checkout.js integration ===
+URL semantics:
+- /customer/bookings?status=CONFIRMED&page=0 — bookmarkable.
+- Status="All" doesn't include the param (cleaner URL).
 
-1. Loading the SDK:
-   - Load https://checkout.razorpay.com/v1/checkout.js once (cache
-     in a module-level boolean or React state). Subsequent
-     bookings reuse the loaded SDK.
-   - State how you handled SDK loading: dynamic <script> append
-     in useEffect, or a utility module.
+=== Page 2: Receipt page (/customer/bookings/:id) ===
 
-2. Initiate:
-   - On "Pay" click, POST /api/customer/bookings/initiate with
-     sub_court_id, booking_date (YYYY-MM-DD), and slots payload.
-     Match the exact request body shape the backend expects from
-     5B; if the body shape isn't documented in your earlier work,
-     verify via a single curl test against a known booking before
-     building the UI around it. State the request body shape.
-   - Capture the response's razorpay_order_id, razorpay_key_id,
-     and amount.
+This replaces the placeholder from 9-customer-booking. The receipt
+is the customer's record of the booking, and it has to honour the
+multi-payment/multi-refund shape from the 6A receipt fix.
 
-3. Instantiate Razorpay:
-   - const rzp = new window.Razorpay({
-       key: <razorpay_key_id>,
-       order_id: <razorpay_order_id>,
-       amount: <amount_in_paise>,
-       currency: "INR",
-       name: "BookMyTurf",
-       description: "<turf name> - <sub-court name>",
-       prefill: { email: user.email, contact: user.phone_number },
-       handler: <success callback>,
-       modal: { ondismiss: <dismiss callback> }
-     });
-   - rzp.open();
-   - State the exact options object you passed.
+Layout:
+- Header with status badge prominently displayed (same color/
+  treatment as the list).
+- Turf, sub-court (clickable → /turfs/{turf_id}).
+- Date (human-readable).
+- Slots: list each slot's time range. For a 2-slot booking show
+  both slot ranges ("9:00 AM – 10:00 AM", "10:00 AM – 11:00 AM").
+- Total amount currently owed (bookings.total_amount).
+- PAYMENTS section: render the payments array.
+  - For a normal booking (1 payment): "Paid ₹X.XX on [date]".
+  - For a multi-payment booking (PAYMENT-reschedule history):
+    list each row chronologically: "Original payment: ₹X.XX on
+    [date]", "Additional charge: ₹X.XX on [date]". Display the
+    payment_method opaque string as-is ("card", "netbanking",
+    "upi" — don't transform; trust the wire format).
+- REFUNDS section (only if refunds array is non-empty):
+  - For a cancelled booking (full refund): "Refunded ₹X.XX on
+    [date]".
+  - For a reschedule-REFUND (partial refund): "Reschedule
+    refund: ₹X.XX on [date]".
+  - Each entry shows amount and date. The razorpay_refund_id is
+    optional (small text, or hidden — your call).
+- Action buttons (depend on booking status — see below).
 
-4. Success callback (handler):
-   - Receives { razorpay_payment_id, razorpay_order_id,
-     razorpay_signature }.
-   - POST /api/customer/bookings/confirm with those three values.
-   - On 200 → navigate to /customer/bookings/{booking_id} (the
-     receipt route — placeholder is fine for this sub-phase if
-     the receipt page proper is in the next sub-phase, but the
-     navigation target must be the booking_id).
-   - On 409 race auto-refund → show "This slot was just taken.
-     Your payment has been refunded — please try a different
-     slot." with a "Back to availability" CTA. The selection is
-     cleared.
-   - On 502 → show "Something went wrong with your payment. Our
-     team has been notified and will contact you." with a
-     "Contact support" link (placeholder route is fine in v1).
-   - On 400 (signature reject — should be rare/impossible with
-     a real Razorpay payment but possible if there's an error in
-     SDK setup) → show "Payment verification failed. If you were
-     charged, please contact support."
-   - Other 4xx/5xx → "Something went wrong. Please try again."
-     with a retry option.
+Action button logic:
+- Status CONFIRMED AND earliest slot >24h in the future:
+  Cancel button ENABLED.
+  Reschedule button ENABLED (placeholder in this sub-phase;
+  9-customer-lifecycle-2 implements the flow). On click in
+  this sub-phase show "Reschedule coming in next sub-phase."
+- Status CONFIRMED AND earliest slot ≤24h or in past:
+  Cancel button VISIBLE but DISABLED. Reschedule same.
+  Inline text below the buttons: "Cancel and reschedule are
+  unavailable within 24 hours of start time."
+- Status COMPLETED: no cancel/reschedule buttons. "Leave a
+  review" button placeholder (9-customer-lifecycle-2). Show
+  "Reviews coming in next sub-phase" on click.
+- Status CANCELLED or REFUNDED: no action buttons. The status
+  badge tells the story.
 
-5. Dismiss callback (modal closed without payment):
-   - Customer cancelled the payment.
-   - No backend call (the initiate already happened and created
-     an unused Razorpay order; that's expected — Razorpay orders
-     have a TTL and stale orders are operationally normal).
-   - Return to the detail page with selection intact (let them
-     try again or modify).
-   - State "Payment cancelled" briefly via the error display
-     pattern (toast or banner).
+Date comparison for the 24h window:
+- The backend enforces this with Asia/Kolkata→Instant comparison.
+- The frontend can compute the same client-side using
+  toZonedTime or by treating the booking_date + slot start_time
+  string as IST, converting to a Date via Date('YYYY-MM-DDTHH:mm:00+05:30'),
+  and comparing to new Date(). State your approach.
+- A small precision detail: the frontend's "24h" check determines
+  whether the BUTTON is enabled. The backend's gate is authoritative
+  — if the frontend allows a click (button enabled) and the backend
+  rejects (just-crossed-the-window edge), the error mapping should
+  surface it cleanly. State that you don't try to second-guess the
+  backend.
 
-=== Error mapping table (REQUIRED reference card in the report) ===
-State the exact mapping you implemented:
-| Backend response | Frontend behavior |
-|---|---|
-| 200 OK | Navigate to /customer/bookings/{id} |
-| 400 | "Payment verification failed..." |
-| 409 | "This slot was just taken..." + Back to availability |
-| 502 | "Something went wrong with your payment..." + Contact support |
-| Other | "Something went wrong. Please try again." |
+States: same loading/error/not-found patterns as elsewhere. A 404
+from the backend (booking-not-yours or non-existent) shows "Booking
+not found" with a back-to-list CTA.
 
-=== TEST-MODE setup ===
-- The backend is wired to Razorpay test mode (rzp_test_* key).
-- The frontend SDK will open the real test-mode modal.
-- Use the test card 5267318187975449, expiry 12/2030, CVV 123,
-  OTP 111111 to make real test payments — same card the backend
-  testing used.
-- One real Razorpay test payment in this sub-phase is sufficient
-  for the happy-path verification.
+=== Cancel flow ===
+
+Triggered by clicking the enabled Cancel button on the receipt
+page. Opens a confirmation modal:
+- Title: "Cancel this booking?"
+- Body: "You'll be refunded ₹X.XX to your original payment method.
+  This cannot be undone."
+- "Cancel booking" primary button (destructive treatment — red).
+- "Keep booking" secondary button (closes modal).
+
+On "Cancel booking" confirm:
+- DELETE /api/customer/bookings/{id}.
+- 200 OK: page state updates IMMEDIATELY. Status badge changes to
+  REFUNDED. Refund row appears in the refunds array (the response
+  contains the updated booking state, or refetch). Cancel/
+  reschedule buttons disappear. NO toast, no notification — the
+  page change is the confirmation.
+- 400 (e.g., not in 24h window — shouldn't happen if button was
+  enabled correctly, but possible at the edge): error banner with
+  the backend's message.
+- 502 (refund-failure path from 6B-ii): error banner "Cancellation
+  failed. Your booking is unchanged. Please try again or contact
+  support." with a "Contact support" link (placeholder). DO NOT
+  imply the cancellation succeeded; the booking stays CONFIRMED
+  and the FAILED refund row is invisible to the customer for v1
+  (admin-queue concern).
+- Network error: "Couldn't reach the server. Please check your
+  connection and try again."
+
+=== Carried-forward contracts to enforce in this sub-phase ===
+
+1. payment_method is opaque varchar. Display whatever the wire
+   format returned. Don't transform "card" to "Credit Card" or
+   any cosmetic remap unless the backend returns the cosmetic
+   form already.
+2. The receipt's payments array can have 1+ entries. For booking
+   33 (from 9-customer-booking) it has 1. For owner 20's
+   booking 21 (from 6C-iii-1b) it has 2. Both render correctly.
+3. The receipt's refunds array can have 0+ entries with various
+   sources (cancel, reschedule, race-recovery — but race-recovery
+   is FILTERED OUT by the 6A endpoint, so the customer never sees
+   booking_id IS NULL rows). Trust the backend's filter.
+4. P1: cancel button disabled with inline text when outside the
+   24h window.
+5. P5: no customer-facing notification; page state is the
+   confirmation.
 
 === Do NOT in this sub-phase ===
-- No "my bookings" list page (next sub-phase).
-- No full receipt page (next sub-phase; this sub-phase only
-  needs to navigate to the receipt route with a placeholder).
-- No reschedule, no cancel.
+- No reschedule logic (lifecycle-2).
+- No reviews (lifecycle-2).
 - No backend changes.
-- No new dependencies unless essential (state any additions).
+- No notifications-list page (already exists from 8C; this
+  sub-phase doesn't touch it).
+- No new dependencies.
 
-=== VERIFICATION via Playwright + real test-mode payment ===
+=== VERIFICATION via Playwright + dev server ===
 
-Use Playwright with a NON-headless browser session (the headless
-mode in some setups doesn't render Razorpay's modal correctly).
-If Playwright + real Razorpay doesn't cooperate in headless mode,
-state so and run the happy-path verification manually with
-DevTools network capture, while letting Playwright handle the
-non-payment paths (auth wall, contiguous-only, dismiss).
+Same standard as 9-customer-booking: state the URL, action, network
+calls (URL + method + body where snake_case matters), and the visible
+result. Use the customer accounts that exist from prior sub-phases
+(testcust@verify.test, test9ts6148@bmt.test, etc.) plus the booking
+33 from 9-customer-booking.
 
-1. Files created/modified. State any new dependencies (probably
-   none beyond the SDK loaded dynamically).
+1. Files created/modified.
 
-2. SLOT SELECTION — log in as customer, navigate to a turf detail
-   page with a fresh future date:
-   a. Click one free slot. Selection state visible. Total shows
-      ₹{rate}.
-   b. Click an adjacent free slot. Selection extends. Total
-      doubles.
-   c. Click the now-selected interior slot (the first one).
-      Selection shrinks. Total halves.
-   d. Click a non-adjacent free slot. Selection REPLACES with
-      that one slot only (per choice (a)).
-   e. Click a taken slot. Nothing happens (it's not clickable).
-   State each step's visible result and the slot ids/times
-   involved.
+2. MY BOOKINGS LIST — log in as customer 47 (the one that booked
+   booking 33):
+   a. Visit /customer/bookings. Network: GET
+      /api/customer/bookings (snake_case params). Show the
+      response and verify booking 33 appears with the right
+      fields.
+   b. State the visible card layout: turf, sub-court, date, slot
+      range, status badge, total, "View details".
+   c. Filter by status=CONFIRMED. URL updates, network refetches
+      with ?status=CONFIRMED, only CONFIRMED bookings visible.
+   d. Filter by REFUNDED. If customer 47 has any REFUNDED
+      bookings, show; otherwise the empty state. (If the test
+      data doesn't include this, note it.)
+   e. Empty state: log in as a fresh customer with zero bookings.
+      Visit /customer/bookings → "You haven't made any bookings
+      yet" + browse CTA. Show.
 
-3. CROSS-SUB-COURT SELECTION:
-   a. Have at least 2 sub-courts in the test data turf (or
-      switch to one that does). Select a slot on sub-court A,
-      then click a slot on sub-court B. Selection should
-      replace, not combine.
+3. RECEIPT PAGE — customer 47, booking 33:
+   a. Click "View details" on booking 33. Navigate to /customer/
+      bookings/33.
+   b. Network: GET /api/customer/bookings/33. Show the response
+      shape (specifically: the payments array structure, refunds
+      array, status).
+   c. Visible content: turf, sub-court, date, slots (2 slot
+      ranges), total, payments section with 1 entry, refunds
+      empty, status CONFIRMED, Cancel and Reschedule buttons.
+   d. State whether earliest slot is >24h in the future (it
+      should be, since booking 33 was for 2026-07-15). The
+      Cancel and Reschedule buttons are ENABLED.
 
-4. REVIEW MODAL:
-   a. Select 2 contiguous slots. Click "Book now". Modal opens.
-   b. Modal shows turf, sub-court, date, slots range, total.
-      All correct.
-   c. "Cancel" returns to detail with selection intact. Reopen.
+4. MULTI-PAYMENT RECEIPT — owner 20's customer credentials don't
+   exist in the build (owner 20 is the seller), but booking 21
+   was rescheduled-PAYMENT and has TWO payment rows. To verify the
+   multi-payment receipt render:
+   a. Log in as the CUSTOMER who owns booking 21 (state which
+      customer that is — likely customer 5 or similar from earlier
+      phases). If those credentials aren't known, log in as
+      whichever customer has access to booking 21 per
+      get-customer-id-from-bookings-table.
+   b. Navigate to /customer/bookings/21. Show network call.
+   c. Visible: payments section shows TWO entries (the original
+      and the additional charge). Refunds section shows the
+      partial refund from 6C-ii-3. State explicitly that both
+      payments and the refund are visible.
+   d. If those credentials aren't known and can't be reset for
+      testing, state so. The structural shape verification can
+      fall back to manually invoking the GET endpoint via curl
+      with a customer JWT and confirming the response shape.
 
-5. RAZORPAY HAPPY PATH (real test payment):
-   a. On the review modal, click "Pay ₹X now".
-   b. Network: POST /api/customer/bookings/initiate. Show
-      request body (snake_case) and response (razorpay_order_id,
-      etc.). State the response shape exactly.
-   c. The Razorpay checkout.js modal opens. State that it
-      opened (a screenshot or the modal's presence in the DOM
-      via Playwright assertion).
-   d. Pay with the test card 5267318187975449, OTP 111111.
-   e. Modal closes; success callback fires.
-   f. Network: POST /api/customer/bookings/confirm with the
-      three Razorpay values (snake_case). 200 OK.
-   g. Frontend navigates to /customer/bookings/{id} (placeholder
-      receipt page is fine — verify the URL is right and the
-      booking_id matches).
-   h. DB CONFIRMATION: raw SELECT against bookings shows a new
-      booking with status=CONFIRMED, total_amount matching the
-      paid amount, customer_id matching the logged-in customer,
-      booking_slots inserted, payments row with status=SUCCESS
-      and booking_id NOT NULL. (This is one place where raw DB
-      checks remain useful even on the frontend side — it's the
-      backend-side proof the payment actually landed correctly.)
+5. CANCEL FLOW — happy path:
+   a. On /customer/bookings/33 (CONFIRMED, >24h future): click
+      Cancel. Modal appears with the "you'll be refunded ₹X"
+      message and the two CTAs.
+   b. Click "Keep booking". Modal closes, no API call. Booking
+      unchanged.
+   c. Click Cancel again, then "Cancel booking". Network: DELETE
+      /api/customer/bookings/33. Show response.
+   d. Page state updates: status badge → REFUNDED. Refunds array
+      shows the new refund entry. Cancel/Reschedule buttons
+      disappear. State the visible diff.
+   e. Razorpay live state: the booking's original payment
+      (pay_xxx) shows amount_refunded equal to the full amount,
+      refund_status="full". Show.
+   f. No toast/notification displayed on top of the page change;
+      P5 invariant.
 
-6. DISMISS PATH:
-   a. Select slots, click Book now, Pay now. Modal opens.
-   b. Close the Razorpay modal without paying (the X button).
-   c. State the visible result: "Payment cancelled" banner/toast;
-      selection still intact on the detail page.
-   d. No /confirm network call fired (only the prior initiate).
+6. CANCEL — WITHIN 24H WINDOW (button disabled):
+   a. Find or stage a CONFIRMED booking with earliest slot within
+      24 hours from now. Stage by direct DB UPDATE on a booking's
+      booking_date / slot start_time if needed.
+   b. Navigate to its receipt. Cancel button is VISIBLE but
+      DISABLED. Inline text "Cancel and reschedule are unavailable
+      within 24 hours of start time" is visible below the button.
+   c. Try to click — nothing happens (or a tooltip appears,
+      depending on implementation). State which.
 
-7. RACE PATH (use the backend's forced-race technique if you can
-   stage it, or simulate by inserting a blocker booking via
-   direct DB UPDATE between the initiate response and the modal
-   payment):
-   a. Initiate a booking for slot X. After initiate succeeds and
-      Razorpay modal is open, insert a blocker booking on slot
-      X via direct DB (the 5C-2 forced-race technique).
-   b. Complete the Razorpay payment normally.
-   c. Confirm fires; backend returns 409 (race-detected, auto-
-      refund per 5C-2b).
-   d. Frontend shows "This slot was just taken. Your payment has
-      been refunded — please try a different slot." with a back
-      CTA.
-   e. Razorpay live state: amount_refunded equals the payment
-      amount.
-   f. If staging the race is impractical in the frontend
-      workflow, skip this and rely on backend tests; state so.
+7. CANCEL — refund-failure path (502, from 6B-ii):
+   a. Enable the fault-injection flag (app.test.force-refund-
+      failure=true in application-local.properties), restart
+      backend.
+   b. Stage a fresh CONFIRMED booking with a real payment and
+      slot >24h. State the booking id.
+   c. As that customer, navigate to the booking's receipt, click
+      Cancel → "Cancel booking".
+   d. Network: DELETE returns 502.
+   e. Error banner shows "Cancellation failed. Your booking is
+      unchanged..." with a Contact support placeholder link.
+   f. Page state: booking STILL CONFIRMED. Cancel/Reschedule
+      buttons still enabled. No misleading state change.
+   g. Disable the flag (false), restart. Confirm the production
+      config is restored.
 
-8. ANONYMOUS USER cannot reach the booking flow:
-   a. Log out. Navigate to a turf detail. Click a slot. Modal
-      offers Sign in / Register (the auth wall from
-      9-customer-auth-and-browse). No initiate call fires.
-   b. Confirm.
+8. STATUS FILTERS — REFUNDED and CANCELLED bookings:
+   a. After the cancel in test 5, navigate /customer/bookings
+      with ?status=REFUNDED. Booking 33 appears with the right
+      visual treatment.
+   b. View its receipt — no action buttons (status terminal).
+   c. If the test data has any CANCELLED bookings (DECISIONS §3
+      zero-amount edge case), verify they render with the right
+      treatment. If none exist (likely), note it.
 
-9. NETWORK PAYLOAD CHECK:
-   - Initiate request body: snake_case throughout.
-   - Confirm request body: snake_case throughout.
-   - All responses: snake_case.
+9. AUTHORIZATION:
+   a. Customer A tries to GET /customer/bookings/{id} for
+      customer B's booking → 404, "Booking not found" page.
+   b. Anonymous user visits /customer/bookings → redirects to
+      /login (role guard).
 
-10. ERROR MAPPING — STATE the exact mapping table you
-    implemented (the 5 rows above) and how you tested at least
-    the 200 and dismiss paths (and 409 if 7 succeeded).
+10. URL ROUND-TRIP:
+    - /customer/bookings?status=CONFIRMED refresh → filter
+      preserved.
+    - /customer/bookings/33 refresh → page reloads correctly.
 
-Do not begin the next sub-phase.
+11. MOBILE: list page collapses to single column at ~375px;
+    receipt page stacks vertically.
+
+12. NETWORK PAYLOAD: all params and bodies snake_case.
+
+Do not begin 9-customer-lifecycle-2.
