@@ -1,291 +1,251 @@
-PHASE 9-customer-other — Customer complaints, queries, and
-notifications inbox. The closing piece of the customer side.
+PHASE 9-owner-foundation-and-dashboard — Owner registration, login
+landing at /owner/dashboard, OwnerNav, dashboard wired to
+/api/owner/dashboard (8B-owner).
 
-Standing rules apply. Stop and report. After acceptance, the
-customer side is fully done and we move to 9-owner.
-Reuse Phase 0 error shape, Phase 2 security UNCHANGED. The backend
-is frozen — build against existing endpoints. No new dependencies.
+Standing rules apply. Stop and report. Do NOT start
+9-owner-turf-management. Reuse Phase 0 error shape, Phase 2 security
+UNCHANGED. The backend is frozen — build against existing endpoints.
+No new dependencies unless essential.
 
-SCOPE: three customer-facing pieces.
-- Raise a complaint: from a booking receipt OR standalone form.
-- Raise a query: same shape as complaints.
-- Notifications inbox: /customer/notifications. Lists the
-  customer's notifications (will be EMPTY for customers per §5)
-  with mark-read and mark-all-read UI. This component is built
-  so it can be reused by /owner/notifications, /admin/notifications,
-  /staff/notifications later — but for now it only renders for
-  the customer portal.
+SCOPE: three things in this sub-phase.
+- Owner self-serve registration flow (/register-owner).
+- Owner portal navigation (OwnerNav component replacing the
+  CustomerNav-on-owner-routes residue from 9-customer-other).
+- Owner dashboard at /owner/dashboard with KPI cards, status
+  breakdowns, payout summary, and date-range filter — wired to
+  the existing 8B-owner endpoint.
+
+=== Locked design decisions ===
+- Q1: self-serve owner registration. Public /register-owner route
+  with a form. Owner accounts default to ACTIVE per Phase 2.
+- Q2: owners land at /owner/dashboard. The /owner stub becomes a
+  redirect to /owner/dashboard (or /owner/dashboard becomes the
+  default route for /owner — state which approach you used).
+- Dashboard UI: KPI cards, no charting library. Pure CSS using the
+  existing design tokens. Bookings-by-status as a small inline
+  table or 4 mini-cards.
 
 === Backend endpoints used (existing, do not modify) ===
-- POST /api/customer/complaints — create complaint.
-- GET /api/customer/complaints — list customer's own complaints.
-- GET /api/customer/complaints/{id} — detail (no notes for customer
-  per 7B Q1 — internal-only).
-- POST /api/customer/queries — create query.
-- GET /api/customer/queries — list customer's own queries.
-- GET /api/customer/queries/{id} — detail.
-- GET /api/notifications — paginated, role-agnostic per 8C.
-- PUT /api/notifications/{id}/read — idempotent.
-- PUT /api/notifications/mark-all-read — bulk.
+- POST /api/auth/register/owner (or whatever the exact path is —
+  state via curl before building; Phase 2 wired customer-register
+  and owner-register as distinct endpoints).
+- POST /api/auth/login — already wired from 9-foundation. Owner
+  login path is the same as customer; the role is in the response.
+- GET /api/owner/dashboard?from_date=&to_date=&turf_id=
+  — the 8B-owner endpoint. Returns total_revenue,
+  total_commission, owner_payout_total, bookings_by_status (4
+  status counts), payouts_summary (3 status amounts), filters
+  echo. Snake_case throughout.
 
-Verify shapes via curl before building if uncertain; state any
-divergence from what we discussed in framing.
+Verify register-owner request and response shapes via curl
+before building the form. State any divergence from the customer-
+register shape.
 
-=== Pages to build ===
+=== /register-owner page ===
 
-PAGE 1: Receipt page inline "Raise a complaint" CTA
-- On /customer/bookings/{id}, add a "Report an issue with this
-  booking" link or button in a subtle location (footer or
-  secondary action area — not competing with primary actions
-  like Cancel/Reschedule/Review).
-- Visible for ALL statuses (CONFIRMED, COMPLETED, CANCELLED,
-  REFUNDED) — customers may legitimately want to complain about
-  any of them.
-- Click opens a modal OR navigates to /customer/complaints/new
-  with the booking_id pre-populated. Modal is simpler; recommend
-  modal.
-- Same "Have a question about this booking?" CTA for queries,
-  same pattern.
+Owner registration form — same shape as customer registration with
+the relevant fields per the backend's CreateOwnerRequest DTO. Likely
+fields (verify via DTO):
+- Name (required, non-empty).
+- Email (required, valid format).
+- Phone (required — Indian phone, 10 digits, per Phase 2's pattern).
+- Password (required, with backend's complexity rules).
+- City (required).
+- Any owner-specific fields the DTO has (e.g., business_name,
+  pan_number — list whatever the DTO exposes; do NOT invent
+  fields).
 
-PAGE 2: /customer/complaints/new — standalone complaint form
-- Form fields per the 7B backend contract: subject (required),
-  description (required), booking_id (optional dropdown of
-  customer's CONFIRMED/COMPLETED/CANCELLED/REFUNDED bookings
-  — exclude OPEN/PENDING since they're not relevant for
-  complaints).
-- Submit → POST /api/customer/complaints. On 201 → navigate to
-  /customer/complaints/{id} (or back to a list with success
-  banner — pick one and state).
-- Errors: backend validation errors surfaced via the existing
-  pattern.
+Submit → POST /api/auth/register/owner. On 201 → auto-login
+(POST /api/auth/login with same email+password) → land on
+/owner/dashboard. On error → backend's {error: "..."} surface via
+ErrorBanner.
 
-PAGE 3: /customer/queries/new — standalone query form
-- Same shape as complaints/new. Subject, description, optional
-  booking_id dropdown.
-- Submit → POST /api/customer/queries. On 201 → navigate to
-  /customer/queries/{id}.
+Cross-reference from /register: add a "Register as a turf owner
+instead" link on /register, and a "Register as a customer" link on
+/register-owner. Cross-navigation so users find the right form.
+The Landing page CTAs ("Login / Register") still go to the customer
+register by default; owners can switch from there or visit the
+owner URL directly.
 
-PAGE 4: /customer/complaints — list of customer's complaints
-- Paginated. Status filter (All, OPEN, IN_PROGRESS, RESOLVED).
-- Card per complaint: subject, status badge, created date,
-  related booking (if booking_id is set, show "Re: Booking #X
-  at Turf Y"; if null, show "General complaint").
-- Empty state: "You haven't raised any complaints. If something's
-  wrong, you can report it from your booking receipt or
-  [raise a general complaint]."
-- "Raise a complaint" CTA somewhere visible → /customer/
-  complaints/new.
+=== OwnerNav component ===
 
-PAGE 5: /customer/complaints/{id} — complaint detail
-- Subject, description, status, created date.
-- Related booking link if booking_id set.
-- NO notes shown (7B Q1 — internal-only).
-- A small "Status: OPEN — we'll respond soon" or similar
-  informational text per status. For RESOLVED status: "Status:
-  RESOLVED on [date]" using the resolved_at column from
-  Phase 7C-accepted schema deviation.
-- 404 (cross-customer) → "Complaint not found" page.
+New component replacing CustomerNav for /owner/* routes. Horizontal
+sub-nav below the existing Header.
 
-PAGE 6: /customer/queries — list of customer's queries
-- Same shape as complaints list. Status filter (All, OPEN,
-  IN_PROGRESS, RESOLVED).
+Items (in this sub-phase, only Dashboard is implemented — the
+others are stubs or links to placeholders):
+- Dashboard → /owner/dashboard (active in this sub-phase).
+- My Turfs → /owner/turfs (stub, "Coming in 9-owner-turf-
+  management").
+- Payouts → /owner/payouts (stub).
+- Reviews → /owner/reviews (stub).
+- Notifications → /owner/notifications (uses the reusable
+  NotificationsPage from 9-customer-other; the OwnerNav now
+  wraps it correctly).
 
-PAGE 7: /customer/queries/{id} — query detail
-- Same shape as complaint detail. No notes shown. resolved_at
-  for RESOLVED status.
+The CustomerNav-on-owner-notifications residue from 9-customer-
+other gets fixed in this sub-phase: replace CustomerNav with
+OwnerNav on /owner/notifications.
 
-PAGE 8: /customer/notifications — notifications inbox
-- Paginated list of the calling user's notifications.
-- Each item: notification type (with friendly label — e.g.,
-  "BOOKING_CANCELLED" → "Your booking was cancelled" or
-  whatever maps appropriately — though note that for CUSTOMERS
-  per §5, no notifications ever get created, so this list is
-  always empty for customers; the component is built ready for
-  population when owner/admin/staff use it later).
-- For empty case (the expected customer state): clean empty-
-  state UI: "No notifications yet."
-- For populated case (forward-prepared for other roles):
-  - Each item shows type, message, created_at, is_read state
-    (visual difference between read and unread — bold unread,
-    normal weight read).
-  - Click an unread notification → PUT
-    /api/notifications/{id}/read → state updates immediately.
-  - "Mark all as read" button visible only if there are unread
-    items → PUT /api/notifications/mark-all-read → state
-    updates immediately.
-- Filterable by is_read (All / Unread / Read) per 8C's
-  is_read filter support.
+=== /owner/dashboard page ===
 
-=== Navigation updates ===
-- Add /customer/complaints, /customer/queries, /customer/
-  notifications to the customer portal's navigation. The
-  customer-portal nav was minimal in 9-foundation; this is the
-  right time to expand it.
-- Recommended nav structure on /customer/* pages: a horizontal
-  or sidebar nav with items: My Bookings, Notifications,
-  Complaints, Queries. State your nav approach.
+Layout:
+- Header (existing) + OwnerNav.
+- Page title: "Dashboard."
+- Date range filter at the top: two date inputs (from / to) plus
+  a "Clear filters" button. Optionally a turf filter dropdown
+  listing the owner's turfs (call the existing /api/owner/turfs
+  endpoint if it exists, or skip the turf filter for v1 if it
+  doesn't — state your choice). The 8B-owner endpoint supports
+  turf_id but if a turf dropdown is complicated for v1, you can
+  defer the dropdown to 9-owner-turf-management and just support
+  the date filter here.
 
-=== Type-label mapping for notifications ===
-For each NotificationType enum value the customer might see
-(in this sub-phase: probably never, but build it correctly for
-forward use), provide a friendly label. Example mapping:
-- BOOKING_CANCELLED → "Booking cancelled"
-- BOOKING_RESCHEDULED → "Booking rescheduled"
-- TURF_APPROVED → "Turf approved"
-- COMPLAINT_ASSIGNED → "Complaint assigned to you"
-- PAYOUT_RELEASED → "Payout released"
-- etc.
+Main content — KPI cards layout (4-column on desktop, stacking
+on mobile):
 
-State your label mapping. For any type not in the mapping,
-default to the raw type string (defensive — frontend doesn't
-break on unknown types).
+Row 1 — Revenue cards:
+- Total Revenue: ₹X (large number).
+- Platform Commission: ₹X (smaller, secondary treatment —
+  visible to owner for transparency, but not the headline).
+- Your Earnings: ₹X (the owner_payout_total, equally prominent
+  as Total Revenue).
+
+Row 2 — Bookings by status (a small grouped section):
+- CONFIRMED: N (green).
+- COMPLETED: N (neutral).
+- CANCELLED: N (grey).
+- REFUNDED: N (amber/red).
+
+Row 3 — Payouts summary cards:
+- Pending Payout: ₹X (amber).
+- Paid Out: ₹X (green).
+- Cancelled Payouts: ₹X (grey).
+
+States:
+- Loading: skeleton or simple loading text for each card.
+- Error: existing ErrorBanner.
+- Empty state (a brand-new owner with no data): all zeros
+  rendered cleanly, with a "Add your first turf" CTA → links
+  to /owner/turfs (which is a stub but the link is the right
+  forward shape).
+
+Date filter behavior:
+- ?from_date=YYYY-MM-DD&to_date=YYYY-MM-DD applied as URL state.
+- Submitting refetches the dashboard with the filter.
+- Snake_case URL params (carried-forward rule).
+- The carried-forward dual-domain rule from 8B-owner applies: the
+  same range filters both booking-domain numbers (revenue,
+  bookings_by_status) and payout-domain numbers (payouts_summary)
+  by their respective fields. Don't try to second-guess that —
+  the backend handles it.
 
 === Carried-forward contracts to enforce ===
 
-1. Customer never sees the notes array on complaints/queries
-   (7B Q1 — internal-only). Verify by inspecting the response
-   for the customer detail endpoint and confirming no notes
-   array is shown.
-2. resolved_at column from Phase 7B/7C schema deviation is
-   surfaced in the detail page when status=RESOLVED.
-3. The customer-facing notifications list is structurally empty
-   per §5 — verify this by checking the response.
-4. The notifications component is reusable; later sub-phases
-   (9-owner, 9-admin, 9-staff) will mount it at their own
-   /<role>/notifications routes and it'll display the populated
-   data correctly.
+1. The 8B-owner response shape: total_revenue is for CONFIRMED +
+   COMPLETED only; REFUNDED/CANCELLED counts appear in
+   bookings_by_status but contribute 0 to revenue. Display the
+   bookings_by_status counts AS-RECEIVED — don't filter.
+2. Snake_case end-to-end.
+3. owner_payout_total = total_revenue - platform_commission. The
+   backend guarantees this is internally consistent (verified in
+   8B-owner). Frontend just displays the field directly; don't
+   re-compute client-side.
+4. The reusable NotificationsPage component should now be wrapped
+   in OwnerNav when mounted at /owner/notifications.
 
 === Do NOT in this sub-phase ===
-- No edit or delete on complaints/queries (the spec doesn't
-  permit it — customers create-only).
-- No notes display on customer-side detail pages.
-- No staff/admin views of complaints/queries (those are 9-staff
-  and 9-admin).
+- No turf or sub-court CRUD (9-owner-turf-management).
+- No payouts list page (9-owner-finance-and-engagement).
+- No reviews-management page.
+- No charting library or other new dependencies.
 - No backend changes.
 
 === VERIFICATION via Playwright + dev server ===
 
-Same standard. State URLs, network calls, visible results. Use
-existing customer accounts (testcust@verify.test, customer 47,
-etc.) and the accumulated test bookings.
+Use existing owner credentials (ownera5a@bmt.test / Test@1234)
+plus stage a fresh owner via the register form.
 
-1. Files created/modified; the new routes added to App.jsx. State
-   the navigation approach for /customer/*. State the
-   notification-type label mapping.
+1. Files created/modified. State the register-owner request shape
+   verified via curl, including any divergence from
+   customer-register. State the route additions.
 
-2. COMPLAINT FROM RECEIPT:
-   a. Log in as customer 47. Navigate to /customer/bookings/33
-      (or whatever booking is currently viewable for this
-      customer).
-   b. Click "Report an issue with this booking" (or equivalent).
-      Modal or page opens. State which.
-   c. Fill subject + description. Submit. Network: POST
-      /api/customer/complaints with snake_case body including
-      booking_id. Show body.
-   d. 201 response. Navigate (or display success). State
-      destination.
-   e. Raw SELECT: complaints row with customer_id=47,
-      booking_id=33, status=OPEN.
+2. OWNER REGISTRATION:
+   a. From the Landing page, navigate to /register-owner (via the
+      cross-link from /register or by direct URL). State path.
+   b. Fill all required fields. Submit. Network: POST
+      /api/auth/register/owner with snake_case body. Show body
+      and response.
+   c. 201 → auto-login → land on /owner/dashboard with the new
+      owner's name visible in the header.
+   d. Raw SELECT: users table has the new owner with role=OWNER,
+      status=ACTIVE.
 
-3. STANDALONE COMPLAINT FORM:
-   a. Navigate to /customer/complaints/new directly.
-   b. The booking_id dropdown shows the customer's eligible
-      bookings (CONFIRMED/COMPLETED/CANCELLED/REFUNDED).
-      State the count.
-   c. Submit a complaint WITHOUT selecting a booking. Network:
-      POST /api/customer/complaints with no booking_id (null).
-      201 response.
-   d. Raw SELECT: complaints row with customer_id=47,
-      booking_id=NULL, status=OPEN. The 7B Q2 schema deviation
-      (booking_id nullable on complaints) is exercised here.
+3. EXISTING OWNER LOGIN:
+   a. Log out. Log in as ownera5a@bmt.test. Should land on
+      /owner/dashboard (not /owner stub).
+   b. OwnerNav visible with Dashboard active.
 
-4. COMPLAINTS LIST:
-   a. /customer/complaints. Network: GET. Show response shape.
-   b. The two complaints from items 2 and 3 visible. State the
-      visual differences: one shows "Re: Booking #33 at Turf X",
-      the other shows "General complaint" (or whatever label
-      you used for null booking_id).
-   c. Filter by status=OPEN, IN_PROGRESS, RESOLVED. URL
-      updates. (If no test data exists for IN_PROGRESS or
-      RESOLVED yet, state "empty state shown for this filter.")
+4. DASHBOARD — NO FILTER:
+   a. GET /api/owner/dashboard fires. Show response shape.
+   b. KPI cards render with the data from the response. State
+      each card's displayed value and confirm it matches the
+      response field-by-field.
+   c. Bookings-by-status: 4 status entries visible with their
+      counts. Visual treatment per status (color coded).
+   d. Payouts summary: 3 status entries.
 
-5. COMPLAINT DETAIL:
-   a. Click into one of the complaints. /customer/complaints/{id}.
-      Network: GET /api/customer/complaints/{id}.
-   b. Show response shape. State EXPLICITLY: the response does
-      NOT include a notes array (carried-forward 7B Q1 internal-
-      only rule). If the backend's response does include a notes
-      array (which would be a backend leak), state that and
-      strip it client-side.
-   c. Visible content: subject, description, status, related
-      booking link, no notes section.
-   d. If a RESOLVED complaint exists (stage one via direct DB
-      UPDATE setting status='RESOLVED' and resolved_at=NOW()
-      on a complaint, then refetch), the detail page shows
-      "Resolved on [date]". State the date display.
+5. DASHBOARD — DATE FILTER:
+   a. Set from_date=2026-08-01, to_date=2026-08-31. Submit.
+      URL updates to include the params. Network refetches with
+      ?from_date=2026-08-01&to_date=2026-08-31 (snake_case).
+      Numbers update.
+   b. Clear filters. URL params removed. Network refetches
+      without params. Numbers return to no-filter state.
 
-6. CROSS-CUSTOMER 404 on complaint detail:
-   a. Customer A creates complaint 1. Customer B logs in,
-      navigates to /customer/complaints/1 (using A's
-      complaint id). Network: 404. UI shows "Complaint not
-      found".
+6. DASHBOARD — FRESH OWNER ZERO STATE:
+   a. Log in as the newly-registered owner from test 2. Network:
+      GET /api/owner/dashboard.
+   b. Response has all zeros (no data). UI renders cleanly:
+      revenue ₹0.00, all counts 0, all payout amounts ₹0.00.
+   c. The "Add your first turf" CTA visible.
 
-7. QUERIES — repeat steps 2-6 for queries:
-   - From-booking and standalone creation.
-   - List.
-   - Detail (no notes, resolved_at if applicable).
-   - Cross-customer 404.
+7. OWNERNAV navigation:
+   a. Click each nav item. Verify routing:
+      - Dashboard → /owner/dashboard (current).
+      - My Turfs → /owner/turfs (stub renders "Coming in
+        9-owner-turf-management" or equivalent).
+      - Payouts → /owner/payouts (stub).
+      - Reviews → /owner/reviews (stub).
+      - Notifications → /owner/notifications (real
+        NotificationsPage component renders, now wrapped in
+        OwnerNav not CustomerNav).
+   b. State that the CustomerNav-on-owner-notifications residue
+      from 9-customer-other is fixed: /owner/notifications now
+      shows OwnerNav.
 
-8. NOTIFICATIONS INBOX (empty for customers per §5):
-   a. /customer/notifications. Network: GET /api/notifications.
-   b. Response: empty list (customers have zero notifications).
-   c. UI shows the empty state: "No notifications yet."
-   d. The "Mark all as read" button is NOT visible (no unread
-      items).
-   e. The is_read filter is visible but with empty results
-      regardless of selection.
+8. ROLE GUARDS:
+   a. Customer tries to visit /owner/dashboard → redirect to /
+      (or wrong-role response). Same role-guard behavior as
+      9-foundation verified.
+   b. Anonymous → /login.
 
-9. NOTIFICATIONS INBOX populated (forward verification):
-   This step exercises the component's populated state by
-   logging in as a user with real notifications, even though
-   that's not the customer's surface. The owner accounts have
-   notifications from earlier phases. Log in as ownera5a@bmt.test:
-   a. Navigate to /owner/notifications (the route may not exist
-      yet — 9-owner sub-phase will add it formally, but the
-      notifications component should be reusable). If the route
-      doesn't exist, mount the component manually at a temporary
-      route OR test via console + component props. State your
-      approach.
-   b. The owner's notifications appear: BOOKING_CANCELLED,
-      BOOKING_RESCHEDULED, etc.
-   c. Click an unread notification. Network: PUT
-      /api/notifications/{id}/read with the right id. Response
-      200. The UI updates immediately (the item visually
-      transitions from bold/unread to normal/read).
-   d. Click "Mark all as read." Network: PUT
-      /api/notifications/mark-all-read. Response: marked_count.
-      All items now show as read.
-   e. Refresh the page. The read state persists (proves it's
-      backed by real PUT calls, not just client state).
-   f. Type-label mapping in action: at least 2 different
-      notification types show their friendly labels (not the raw
-      enum string). State which ones you saw.
+9. NOTIFICATIONS via OwnerNav:
+   a. /owner/notifications (logged in as ownera5a). State that
+      the NotificationsPage renders correctly with the existing
+      owner's notifications (48 from earlier tests).
+   b. OwnerNav is at the top, not CustomerNav. State this
+      explicitly.
 
-10. NAVIGATION:
-    a. From /customer/bookings, the navigation includes My
-       Bookings (active), Notifications, Complaints, Queries.
-    b. Click each and verify the right route loads.
+10. CROSS-LINKS on register pages:
+    a. /register has "Register as a turf owner" link → /register-
+       owner.
+    b. /register-owner has "Register as a customer" link →
+       /register.
 
-11. ANONYMOUS:
-    a. Anonymous visits /customer/complaints → redirected to
-       /login (role guard).
-    b. Same for queries, notifications.
+11. NETWORK PAYLOADS: all snake_case throughout.
 
-12. NETWORK PAYLOADS: all snake_case throughout.
+12. MOBILE responsive: dashboard KPI cards stack to single column
+    on ~375px width. OwnerNav usable on mobile.
 
-13. §5 EXPLICIT VERIFICATION: the customer's notification list
-    is empty. State the DB-side query: SELECT COUNT(*) FROM
-    notifications WHERE user_id = (customer 47's user_id). Should
-    be 0.
-
-9-customer-other complete. Customer side is fully done.
+Do not begin 9-owner-turf-management.

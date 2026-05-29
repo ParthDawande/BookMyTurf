@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { listNotifications, markOneRead, markAllRead } from '../api/notifications';
 import Header from '../components/Header';
 import CustomerNav from '../components/CustomerNav';
+// Nav can be overridden by callers (e.g., OwnerNav for /owner/notifications)
 
 // ── Notification type → friendly label ───────────────────────────────────────
 
@@ -38,7 +39,7 @@ function ReadBadge({ isRead }) {
 
 // ── NotificationsPage ─────────────────────────────────────────────────────────
 
-export default function NotificationsPage() {
+export default function NotificationsPage({ Nav = CustomerNav }) {
   const navigate = useNavigate();
 
   const [items,      setItems]      = useState([]);
@@ -90,7 +91,7 @@ export default function NotificationsPage() {
   return (
     <div style={{ minHeight: '100vh', background: '#f5f7fa' }}>
       <Header />
-      <CustomerNav />
+      <Nav />
 
       <main style={{ maxWidth: '700px', margin: '0 auto', padding: '1.5rem 1rem' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem', flexWrap: 'wrap', gap: '0.75rem' }}>
