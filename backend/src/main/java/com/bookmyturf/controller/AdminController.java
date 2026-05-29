@@ -1,6 +1,8 @@
 package com.bookmyturf.controller;
 
 import com.bookmyturf.dto.admin.AdminListResponse;
+import com.bookmyturf.dto.admin.AdminStaffListResponse;
+import com.bookmyturf.dto.admin.AdminUserListResponse;
 import com.bookmyturf.dto.admin.CreateAccountRequest;
 import com.bookmyturf.dto.admin.CreateAdminResponse;
 import com.bookmyturf.dto.admin.CreateStaffResponse;
@@ -63,7 +65,7 @@ public class AdminController {
     }
 
     // -------------------------------------------------------------------------
-    // Staff account creation
+    // Staff account creation + list
     // -------------------------------------------------------------------------
 
     @PostMapping("/staff")
@@ -71,6 +73,27 @@ public class AdminController {
     public CreateStaffResponse createStaff(@AuthenticationPrincipal User caller,
                                             @Valid @RequestBody CreateAccountRequest req) {
         return adminService.createStaff(caller, req);
+    }
+
+    @GetMapping("/staff")
+    public AdminStaffListResponse listStaff(
+            @RequestParam(defaultValue = "1") int page,
+            @RequestParam(name = "page_size", defaultValue = "20") int pageSize) {
+        return adminService.listStaff(page, pageSize);
+    }
+
+    // -------------------------------------------------------------------------
+    // User list
+    // -------------------------------------------------------------------------
+
+    @GetMapping("/users")
+    public AdminUserListResponse listUsers(
+            @RequestParam(required = false) String role,
+            @RequestParam(required = false) String status,
+            @RequestParam(required = false) String search,
+            @RequestParam(defaultValue = "1") int page,
+            @RequestParam(name = "page_size", defaultValue = "20") int pageSize) {
+        return adminService.listUsers(role, status, search, page, pageSize);
     }
 
     // -------------------------------------------------------------------------

@@ -1,223 +1,401 @@
-PHASE 9-admin-foundation-and-dashboard — AdminNav + admin dashboard
-at /admin/dashboard. Smaller of the two admin sub-phases; the
-operations sub-phase follows.
+PHASE 9-admin-operations — Approval queues (turfs + sub-courts),
+user management with search, staff management, complaints/queries
+admin override. The largest single sub-phase of the build.
 
-Standing rules apply. Stop and report. Do NOT start
-9-admin-operations. Reuse Phase 0 error shape, Phase 2 security
-UNCHANGED. The backend is frozen — build against existing
-endpoints. No new dependencies.
+Standing rules apply. Stop and report. Do NOT start 9-staff. Reuse
+Phase 0 error shape, Phase 2 security UNCHANGED. The backend is
+frozen for substantive business logic; small surgical additions
+allowed per the established pattern if a needed endpoint doesn't
+exist (verify first, decide separately). No new dependencies.
 
-SCOPE: two things in this sub-phase.
-- AdminNav component (Dashboard / Approvals / Users / Staff /
-  Complaints / Queries / Notifications).
-- Admin dashboard at /admin/dashboard wired to the 8B-admin
-  endpoint.
-
-Same shape as 9-owner-foundation-and-dashboard. Reuses the
-NotificationsPage component with the Nav prop (now AdminNav). The
-/admin stub from 9-foundation becomes a redirect to
-/admin/dashboard.
-
-=== Backend endpoints used (existing, do not modify) ===
-- GET /api/admin/dashboard?from_date=&to_date= (8B-admin endpoint
-  with platform-wide aggregations, snapshot fields, dual-domain
-  date filter per the 8B-admin contract).
-- GET /api/notifications (8C, role-agnostic, already wired in
-  9-customer-other's NotificationsPage).
-
-Verify the admin dashboard response shape via curl before
-building. The 8B-admin contract returned 17 fields when we
-verified it; confirm they're all still there:
-- total_revenue, platform_commission, owners_payout_total
-- bookings_by_status (CONFIRMED/COMPLETED/CANCELLED/REFUNDED)
-- payouts_summary (PENDING/PAID/CANCELLED)
-- pending_approvals.turfs, pending_approvals.sub_courts
-- open_complaints, open_queries
-- active_users.customers, active_users.owners, active_users.staff
-- filters echo
+SCOPE: four operational feature areas in one bundle. Replaces the
+five stubs in /admin/* from 9-admin-foundation-and-dashboard:
+- /admin/approvals — pending turfs + pending sub-courts queues
+  with approve/reject.
+- /admin/users — paginated list with search by email/name +
+  role filter, suspend/ban/activate actions.
+- /admin/staff — staff list with create/deactivate/reactivate.
+- /admin/complaints + /admin/queries — admin-override views
+  with reassign (complaints only) and resolve actions.
 
 === Locked design decisions ===
-- Q2 (carried from 9-owner): admin lands at /admin/dashboard
-  post-login. The /admin stub from 9-foundation becomes a
-  redirect to /admin/dashboard.
-- KPI-card dashboard layout (no charting library). Same shape
-  as owner dashboard with two extra row groups for the snapshot
-  fields specific to admin (pending approvals, open
-  complaints/queries, active users).
+- Q1: Approve via confirmation modal (no reason required). Reject
+  via modal with REQUIRED reason field (admin must type why).
+  Backend's Phase 4 reject endpoint probably accepts a reason
+  field — verify and use whatever shape the DTO has. If the
+  backend doesn't require a reason, the frontend still requires
+  it as UX policy and sends it as part of the request.
+- Q2: User list paginated + search by email/name + role filter.
+  Backend endpoint shape needs verification via curl — likely
+  ?role=&search=&page=&size=. State actual shape.
+- Q3 (default): Admin sets initial password when creating staff.
+  Display a banner on staff list: "New staff should reset their
+  password after first login. (Password reset flow is a v2 polish
+  item.)"
+- Q4 (default): Inline actions on /admin/complaints and
+  /admin/queries — list view IS the action surface, with
+  Reassign + Resolve buttons on each card. Modals for both
+  actions with required fields.
+- Confirmation modals for all destructive/material actions (ban,
+  reject, deactivate-staff, resolve, reassign). Suspend/activate
+  also confirm.
 
-=== AdminNav component ===
+=== Pre-build endpoint discovery (verify all via curl) ===
 
-Horizontal sub-nav below the existing Header. Items:
-- Dashboard → /admin/dashboard (active in this sub-phase).
-- Approvals → /admin/approvals (stub, "Coming in 9-admin-
-  operations").
-- Users → /admin/users (stub).
-- Staff → /admin/staff (stub).
-- Complaints → /admin/complaints (stub).
-- Queries → /admin/queries (stub).
-- Notifications → /admin/notifications (uses reusable
-  NotificationsPage with AdminNav prop).
+APPROVALS:
+- GET /api/admin/turfs?status=PENDING — list pending turfs.
+- POST or PUT /api/admin/turfs/{id}/approve — approve.
+- POST or PUT /api/admin/turfs/{id}/reject — reject with reason.
+- Same shapes for sub-courts: /api/admin/sub-courts/...
+State actual endpoint paths and request body shapes.
 
-The Nav prop pattern established in 9-customer-other and used
-correctly in 9-owner-foundation-and-dashboard applies here:
-NotificationsPage accepts <NavigationComponent /> as a prop;
-admin mounts it with AdminNav.
+USER MANAGEMENT:
+- GET /api/admin/users — likely accepts role, search, status,
+  page, page_size. State shape.
+- PUT or POST /api/admin/users/{id}/suspend, /ban, /activate
+  (likely separate endpoints per action). State shape.
 
-=== /admin/dashboard page ===
+STAFF MANAGEMENT:
+- GET /api/admin/staff — list staff accounts.
+- POST /api/admin/staff — create staff (body: name, email, phone,
+  password). Verify shape.
+- PUT /api/admin/staff/{id}/deactivate or .../activate — state
+  shape.
+
+COMPLAINTS OVERRIDE:
+- GET /api/admin/complaints — list ALL complaints (not just
+  staff-assigned). Likely accepts status, page, page_size,
+  optionally assignedStaffId.
+- PUT /api/admin/complaints/{id}/reassign — body
+  {staff_id: <new staff>}.
+- PUT /api/admin/complaints/{id}/resolve — body
+  {resolution_note: "..."}.
+
+QUERIES OVERRIDE:
+- GET /api/admin/queries — list all queries.
+- PUT /api/admin/queries/{id}/resolve — body
+  {resolution_note: "..."}. Note: queries don't have
+  reassignment per 7C (atomic-claim model).
+
+Verify all endpoints exist. If any doesn't, state and discuss
+before building UI against it.
+
+=== /admin/approvals page ===
 
 Layout:
-- Header + AdminNav with Dashboard active.
-- Page title: "Admin Dashboard."
-- Date range filter at the top: from_date / to_date snake_case
-  URL params. Same shape as owner dashboard.
+- Header + AdminNav with Approvals active.
+- Page title: "Pending Approvals".
+- Two sections (tabs or two grouped lists):
+  - Turfs awaiting approval (count from dashboard's
+    pending_approvals.turfs).
+  - Sub-courts awaiting approval (count from
+    pending_approvals.sub_courts).
 
-Main content — three sections:
+For each PENDING turf:
+- Cover photo (or placeholder).
+- Turf name, city, owner (name + email).
+- Description excerpt.
+- Sub-courts list (count or first few).
+- Approve button (green) + Reject button (red).
 
-SECTION 1: Financial overview (KPI cards, 3-column on desktop):
-- Total Revenue: ₹X (large).
-- Platform Commission: ₹X (the platform's earned commission —
-  what the business itself earned, not the gross).
-- Owners' Total Payout: ₹X.
+Approve flow:
+- Click Approve → confirmation modal: "Approve {turf name}?
+  This turf will become visible to customers."
+- Confirm → PUT /api/admin/turfs/{id}/approve. 200 → card
+  disappears from queue. No toast.
+- Error → ErrorBanner.
 
-SECTION 2: Operational snapshot (NOT subject to date filter):
-A clearly labeled "Current State" section with a small note:
-"These reflect the current operational state, not the date range."
+Reject flow:
+- Click Reject → modal with required textarea "Reason for
+  rejection (the owner will see this)." Submit disabled if
+  textarea is empty.
+- Submit → PUT /api/admin/turfs/{id}/reject with
+  {reason: "..."}. 200 → card disappears.
+- Error → ErrorBanner.
 
-Two rows of cards:
+Same flows for sub-courts. Sub-court approval is independent
+of turf approval (a turf can be APPROVED while one of its
+sub-courts is still PENDING per Phase 4 contract).
 
-Row 2a — Pending approvals:
-- Turfs awaiting approval: N (clickable → /admin/approvals,
-  stub for now).
-- Sub-courts awaiting approval: N (clickable → /admin/approvals).
+Empty state: "No pending approvals." Shown when both queues
+empty.
 
-Row 2b — Open tickets:
-- Open complaints: N (clickable → /admin/complaints, stub).
-- Open queries: N (clickable → /admin/queries, stub).
+=== /admin/users page ===
 
-Row 2c — Active users:
-- Customers: N
-- Owners: N
-- Staff: N
+Layout:
+- Header + AdminNav with Users active.
+- Page title: "User Management".
+- Filter row:
+  - Role dropdown: All / CUSTOMER / OWNER / STAFF / ADMIN.
+  - Status dropdown: All / ACTIVE / SUSPENDED / BANNED.
+  - Search input: "Search by email or name..." Submits on
+    enter or button click.
+- User table or card list:
+  - Columns: Name, Email, Role, Status (badge color-coded),
+    Joined date, Actions.
+  - Actions per status:
+    - ACTIVE: Suspend button + Ban button.
+    - SUSPENDED: Activate button + Ban button.
+    - BANNED: Activate button (un-bans).
+- Pagination at the bottom.
 
-SECTION 3: Booking + payout state (subject to date filter,
-same as owner dashboard):
+All actions use confirmation modals:
+- "Suspend {user name}? They won't be able to log in until
+  reactivated."
+- "Ban {user name}? This is a strong action — they won't be
+  able to access the platform. You can reactivate later if
+  needed."
+- "Activate {user name}? They'll regain platform access."
 
-Row 3a — Bookings by status:
-CONFIRMED / COMPLETED / CANCELLED / REFUNDED (4 mini-cards,
-color-coded per status).
+Each modal action → PUT to the appropriate endpoint. List
+refetches on success.
 
-Row 3b — Payouts summary:
-Pending / Paid / Cancelled (3 mini-cards, color-coded).
+URL semantics:
+?role=OWNER&status=ACTIVE&search=verify&page=0&size=20 (snake_case).
+Bookmarkable.
 
-States: loading skeleton, error banner, empty (all zeros render
-cleanly — admin starting from scratch wouldn't have meaningful
-data, but verify it renders).
+Empty state: "No users match your filters."
 
-URL semantics: /admin/dashboard?from_date=&to_date= snake_case,
-bookmarkable, refresh-preservable.
+=== /admin/staff page ===
+
+Layout:
+- Header + AdminNav with Staff active.
+- Page title: "Staff Management".
+- Banner at top: "New staff should reset their password after
+  first login. (Password reset flow is a v2 polish item.)"
+- "+ Add new staff" CTA at the top right.
+- Staff table:
+  - Columns: Name, Email, Status, Joined, Actions.
+  - Actions: Deactivate (if active) / Activate (if not active).
+
+Create staff modal:
+- Fields: name (required), email (required, valid), phone
+  (required), password (required, with backend's complexity
+  rules — show inline hint about rules per Phase 2 spec).
+- Submit → POST /api/admin/staff. 201 → modal closes, list
+  refetches with new staff visible.
+
+Deactivate/activate flows: confirmation modal → PUT → list
+refetches.
+
+States: loading, error, empty.
+
+=== /admin/complaints page ===
+
+Layout:
+- Header + AdminNav with Complaints active.
+- Page title: "Complaints" (with badge showing open count
+  matching dashboard's open_complaints).
+- Filter row: Status (All / OPEN / IN_PROGRESS / RESOLVED).
+- Complaint table or card list:
+  - Customer name + email.
+  - Subject + description excerpt.
+  - Related booking (if booking_id set, link to admin's
+    booking-view — that doesn't exist as a route, so just
+    show "Booking #X at Turf Y" as text).
+  - Status badge.
+  - Assigned to (staff name or "Unassigned").
+  - Created date.
+  - Actions: Reassign + Resolve (conditional on status).
+
+Reassign flow (only for OPEN or IN_PROGRESS):
+- Modal: "Reassign complaint #X to:" with staff dropdown
+  (populated from GET /api/admin/staff or whatever staff
+  list endpoint is available). Required selection.
+- Submit → PUT /api/admin/complaints/{id}/reassign with
+  {staff_id}. 200 → list refetches.
+
+Resolve flow (admin override, only for OPEN or IN_PROGRESS):
+- Modal: "Resolve complaint #X" with required resolution_note
+  textarea.
+- Submit → PUT /api/admin/complaints/{id}/resolve with
+  {resolution_note}. 200 → list refetches.
+
+Complaint detail view: optional. If the list shows enough info
+inline, no detail page needed in v1. Verify the list response
+includes all needed fields (description, customer info, etc.).
+If not, add a /admin/complaints/{id} detail page.
+
+States: loading, error, empty.
+
+=== /admin/queries page ===
+
+Same shape as complaints but without reassign (per 7C
+atomic-claim model — queries don't have static assignment to
+reassign).
+
+Filter row: Status (All / OPEN / IN_PROGRESS / RESOLVED).
+Each query card: customer, subject, description excerpt,
+status badge, picked_up_by_staff (name or "Unclaimed"),
+created date, Resolve action.
+
+Resolve flow: same as complaints (modal with required
+resolution_note → PUT /api/admin/queries/{id}/resolve).
 
 === Carried-forward contracts ===
 
-1. The 8B-admin contract: snapshot fields (pending_approvals,
-   open_complaints, open_queries, active_users) have NO date
-   filter applied. Display them with a small label explaining
-   why ("current state, not date-filtered"). The dual-domain
-   rule from 8B-owner applies here too: bookings filtered by
-   booking_date, payouts by scheduled_at.
+1. P5: page-state-as-confirmation. After approve/reject/
+   suspend/ban/resolve/reassign, the list refetches and
+   reflects the new state. No toast.
 2. Snake_case throughout.
-3. Phase 2 routing: customer/owner/staff can't reach
-   /admin/dashboard → redirect to / per RoleGuard.
-4. The parallel-fetch pattern from 9-owner-finance-and-engagement
-   (dashboard + profile in parallel on mount) MAY apply here if
-   admin has an analogous "profile" need. For v1 we just fetch
-   the dashboard; admin doesn't have the bank-details kind of
-   completion check that owners do.
+3. 404-not-403 on cross-resource ownership where applicable
+   (mostly N/A for admin — admin sees everything).
+4. Backend enforces resolution_note non-empty per 7B; frontend
+   gates submit if textarea empty.
+5. Backend enforces one resolve per complaint per 7B; if admin
+   resolves a complaint that's already RESOLVED, 400 from
+   backend.
+6. Phase 2 routing: per-request DB status check. Admin actions
+   on a user that admin just banned (suspend then ban quickly)
+   — the per-request check applies on subsequent requests, so
+   the user is locked out at their next page load regardless
+   of session state.
+7. Notifications: §5 says owner gets TURF_APPROVED /
+   TURF_REJECTED / SUBCOURT_APPROVED / SUBCOURT_REJECTED when
+   admin acts on their turf/sub-court. Staff gets
+   COMPLAINT_ASSIGNED when admin reassigns. These notifications
+   fire from the backend automatically; the admin doesn't need
+   to do anything special in the UI to trigger them. Verify
+   they fire as a side effect of admin actions.
 
 === Do NOT in this sub-phase ===
-- No approval queues (9-admin-operations).
-- No user/staff management.
-- No complaints/queries lists.
-- No backend changes.
-- No new dependencies (no charting library).
+- No staff-portal work (9-staff).
+- No customer or owner side changes.
+- No backend changes for substantive logic; small surgical
+  additions allowed only if a verified endpoint doesn't exist.
+- No new charting libraries.
 
-=== VERIFICATION via Playwright + dev server ===
+=== STAFF TEST ACCOUNT — CAPTURE FOR 9-STAFF ===
+- During this sub-phase, you'll create at least one staff
+  account via the admin "+ Add new staff" flow.
+- CAPTURE the credentials (email + initial password) and
+  state them clearly in the verification report — 9-staff
+  needs them to log in.
 
-Use admin@bookmyturf.in / Test@1234 from earlier phases. Test
-data state from 8B-admin acceptance: 28 total bookings across
-2 active owners, 17800 revenue, 1780 commission (this has grown
-since 8B-admin landed — booking 33/34/35 etc were added during
-9-customer-* sub-phases), 3 pending turfs, 4 pending sub-courts
-(approximately — verify against the live numbers).
+=== VERIFICATION via Playwright + real action against real
+backend ===
 
-1. Files created/modified. State the admin dashboard response
-   shape verified via curl, side-by-side with what 8B-admin
-   shipped — confirm all 17 fields still present. State whether
-   /admin redirects to /admin/dashboard.
+Use admin@bookmyturf.in. Use the existing test data state from
+the 9-admin-foundation-and-dashboard acceptance: 3 pending
+turfs, 4 pending sub-courts, 11 open complaints, 7 open queries,
+17 customers + 12 owners + 3 staff active.
 
-2. ADMIN LOGIN:
-   a. Log in as admin. Land on /admin/dashboard (not /admin
-      stub).
-   b. AdminNav visible with Dashboard active.
+1. Files created/modified. State all endpoint shapes verified
+   via curl. State any divergence from the prompt's expected
+   shapes. Identify any missing endpoints if any.
 
-3. DASHBOARD — NO FILTER:
-   a. GET /api/admin/dashboard fires. Show response.
-   b. KPI cards render field-by-field with response data.
-      State each card's value side-by-side with the response
-      field (same discipline as 9-owner-foundation-and-dashboard
-      item 4b).
-   c. Section 1: revenue/commission/payout cards.
-   d. Section 2: pending_approvals, open_complaints, open_queries,
-      active_users cards. Each with the "current state" label.
-   e. Section 3: bookings_by_status (4 cards) and
-      payouts_summary (3 cards) with color coding.
+2. APPROVALS — TURFS:
+   a. /admin/approvals. Network: GET /api/admin/turfs?status=PENDING.
+      Show response.
+   b. State the 3 pending turfs visible with owner info.
+   c. Approve one. Modal appears with turf details. Confirm.
+      Network: PUT to approve endpoint with snake_case body.
+      200 response. Card disappears from queue.
+   d. DB raw SELECT: that turf's status is now APPROVED.
+   e. Owner notifications: verify TURF_APPROVED notification
+      created for that turf's owner.
+   f. Public listing: GET /api/public/turfs anonymous now
+      includes the newly-approved turf (it wasn't visible
+      before).
 
-4. SNAPSHOT INVARIANT — explicitly verify:
-   a. With no date filter: capture values of pending_approvals,
-      open_complaints, open_queries, active_users.
-   b. Apply date filter (?from_date=2026-08-01&to_date=2026-08-31).
-      Network refetches.
-   c. STATE that the snapshot fields are UNCHANGED in the
-      filtered response (the carried-forward 8B-admin rule).
-   d. The financial cards and bookings/payouts DID change.
-      Show the numbers before and after.
+3. APPROVALS — TURFS — REJECT:
+   a. Reject another pending turf. Modal with required reason.
+      Empty reason: submit disabled.
+   b. Enter reason "Photos are too low quality. Please add
+      higher-resolution photos and resubmit." Submit.
+   c. Network: PUT reject endpoint with reason. 200.
+   d. DB: status=REJECTED, rejection_reason saved (if
+      schema has the column — verify).
+   e. Owner notifications: TURF_REJECTED notification created.
 
-5. DATE FILTER ROUND-TRIP:
-   - Apply filter. URL updates with snake_case params.
-   - Refresh page. Filter preserved, refetch fires.
-   - Clear filters. URL params removed. Numbers restore.
+4. APPROVALS — SUB-COURTS:
+   a. Approve a pending sub-court. Similar to turfs.
+   b. Reject another with reason. Similar.
+   c. DB confirms sub_courts.status = APPROVED / REJECTED.
 
-6. ADMINNAV navigation:
-   a. Click each nav item:
-      - Dashboard → /admin/dashboard (current).
-      - Approvals → /admin/approvals (stub).
-      - Users → /admin/users (stub).
-      - Staff → /admin/staff (stub).
-      - Complaints → /admin/complaints (stub).
-      - Queries → /admin/queries (stub).
-      - Notifications → /admin/notifications (NotificationsPage
-        with AdminNav).
-   b. State that /admin/notifications shows AdminNav (NOT
-      OwnerNav or CustomerNav).
+5. USERS — LIST + FILTERS:
+   a. /admin/users. Network: GET /api/admin/users.
+   b. State total count and visible page size.
+   c. Filter by role=OWNER. Refetch. Only owners visible.
+   d. Filter by status=ACTIVE. Refetch.
+   e. Search "verify" (matches several test emails like
+      testcust@verify.test, freshowner@verify.test, etc.).
+      Network includes ?search=verify. Verify the search
+      narrows results.
+   f. Pagination: page 0 → page 1. Different users on each.
 
-7. ROLE GUARDS:
-   a. Customer → /admin/dashboard redirects to /.
-   b. Owner → /admin/dashboard redirects to /.
-   c. Staff → /admin/dashboard redirects to /.
-   d. Anonymous → /login.
+6. USERS — SUSPEND/BAN/ACTIVATE:
+   a. Suspend an OWNER. Confirmation modal → PUT suspend.
+      200. List refetches. User's status badge now SUSPENDED.
+   b. Try logging in as that suspended user — login attempt
+      should fail (Phase 2 per-request check).
+   c. Activate. PUT activate. Status ACTIVE.
+   d. Login retry — succeeds.
+   e. Ban a CUSTOMER. Same flow. Verify ban prevents login.
+   f. Activate. Same.
 
-8. CROSS-PORTAL CONSISTENCY:
-   - Verify admin dashboard numbers match what 8B-admin tested
-     (modulo growth from 9-customer-* booking activity).
-   - Specifically: bookings_by_status counts should be the SUM
-     of all owners' counts (admin sees platform-wide), so
-     admin.bookings_by_status.CONFIRMED should equal owner-20-
-     dashboard.bookings_by_status.CONFIRMED + owner-32-
-     dashboard.bookings_by_status.CONFIRMED + any other owner's
-     CONFIRMED count.
-   - Spot-check this with one status. State the math.
+7. STAFF — CREATE + LIFECYCLE:
+   a. /admin/staff. Initial list shows 3 existing staff.
+   b. "+ Add new staff" → modal with name/email/phone/password.
+   c. Submit with name "Test Staff One", email "staff9a@bmt.test",
+      phone, password "TestStaff@123" (or whatever meets the
+      complexity rules — state what you used).
+   d. Network: POST. 201 → modal closes, list now shows
+      4 staff including the new one.
+   e. DB raw SELECT: users table has the new staff with
+      role=STAFF, status=ACTIVE.
+   f. CAPTURE THESE CREDENTIALS IN REPORT FOR 9-STAFF USE.
+   g. Deactivate a staff member. PUT deactivate. Status changes.
+   h. Reactivate. PUT activate.
 
-9. NETWORK PAYLOADS: all snake_case throughout.
+8. COMPLAINTS OVERRIDE:
+   a. /admin/complaints. Network: GET. Show response shape.
+   b. State the visible OPEN complaints (matching the
+      dashboard's 11).
+   c. Reassign one complaint. Modal with staff dropdown.
+      Select the newly-created staff. Submit → PUT reassign
+      with {staff_id}. 200. List shows new assignee.
+   d. DB raw SELECT: complaints.assigned_staff_id updated.
+   e. Notifications: COMPLAINT_ASSIGNED notification created
+      for the new staff.
+   f. Resolve a different complaint directly (admin override).
+      Modal with required resolution_note. Empty: disabled.
+   g. Submit "Resolved by admin during platform review." → PUT
+      resolve. 200.
+   h. DB raw SELECT: status=RESOLVED, resolved_at set,
+      resolution_note saved.
 
-10. MOBILE: dashboard sections stack vertically on ~375px width.
+9. QUERIES OVERRIDE:
+   a. /admin/queries. Network: GET. Show response shape.
+   b. Resolve one with the override action. Same modal pattern.
+   c. DB confirms resolution.
 
-Do not begin 9-admin-operations.
+10. NOTIFICATIONS SIDE EFFECTS:
+    Summary count of notifications created during this entire
+    test run:
+    - TURF_APPROVED: at least 1.
+    - TURF_REJECTED: at least 1.
+    - SUBCOURT_APPROVED: at least 1.
+    - SUBCOURT_REJECTED: at least 1.
+    - COMPLAINT_ASSIGNED: at least 1.
+    - ZERO customer-facing types (§5).
+    State the SELECT counts to verify.
+
+11. CROSS-ROLE GUARDS:
+    a. Owner navigates to /admin/approvals → redirect to /.
+    b. Customer same.
+    c. Staff same.
+    d. Anonymous → /login.
+
+12. SNAPSHOT ACCURACY AFTER OPERATIONS:
+    a. After several approvals/resolutions/staff creation:
+       reload /admin/dashboard. The pending_approvals count
+       has decreased. The open_complaints/open_queries counts
+       have decreased. active_users.staff increased by 1.
+    b. State the before/after numbers.
+
+13. NETWORK PAYLOADS: snake_case throughout.
+
+14. MOBILE: each admin page responsive at 375px width.
+
+Do not begin 9-staff.

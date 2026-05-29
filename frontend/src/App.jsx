@@ -30,7 +30,11 @@ import OwnerPayouts    from './pages/OwnerPayouts';
 import OwnerReviews    from './pages/OwnerReviews';
 import OwnerAccount    from './pages/OwnerAccount';
 import AdminDashboard  from './pages/AdminDashboard';
-import AdminStub       from './pages/AdminStub';
+import AdminApprovals  from './pages/AdminApprovals';
+import AdminUsers      from './pages/AdminUsers';
+import AdminStaff      from './pages/AdminStaff';
+import AdminComplaints from './pages/AdminComplaints';
+import AdminQueries    from './pages/AdminQueries';
 import AdminNav        from './components/AdminNav';
 
 function CG({ children }) {
@@ -82,11 +86,11 @@ export default function App() {
         <Route path="/admin"               element={<Navigate to="/admin/dashboard" replace />} />
         <Route path="/admin/dashboard"     element={<RoleGuard role="ADMIN"><AdminDashboard /></RoleGuard>} />
         <Route path="/admin/notifications" element={<RoleGuard role="ADMIN"><NotificationsPage Nav={AdminNav} /></RoleGuard>} />
-        <Route path="/admin/approvals"     element={<RoleGuard role="ADMIN"><AdminStub title="Approvals" /></RoleGuard>} />
-        <Route path="/admin/users"         element={<RoleGuard role="ADMIN"><AdminStub title="Users" /></RoleGuard>} />
-        <Route path="/admin/staff"         element={<RoleGuard role="ADMIN"><AdminStub title="Staff" /></RoleGuard>} />
-        <Route path="/admin/complaints"    element={<RoleGuard role="ADMIN"><AdminStub title="Complaints" /></RoleGuard>} />
-        <Route path="/admin/queries"       element={<RoleGuard role="ADMIN"><AdminStub title="Queries" /></RoleGuard>} />
+        <Route path="/admin/approvals"     element={<RoleGuard role="ADMIN"><AdminApprovals /></RoleGuard>} />
+        <Route path="/admin/users"         element={<RoleGuard role="ADMIN"><AdminUsers /></RoleGuard>} />
+        <Route path="/admin/staff"         element={<RoleGuard role="ADMIN"><AdminStaff /></RoleGuard>} />
+        <Route path="/admin/complaints"    element={<RoleGuard role="ADMIN"><AdminComplaints /></RoleGuard>} />
+        <Route path="/admin/queries"       element={<RoleGuard role="ADMIN"><AdminQueries /></RoleGuard>} />
         <Route path="/admin/*"             element={<RoleGuard role="ADMIN"><AdminDashboard /></RoleGuard>} />
         <Route path="/staff/*"  element={<RoleGuard role="STAFF"><StaffHome /></RoleGuard>} />
       </Routes>

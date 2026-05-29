@@ -2,6 +2,8 @@ package com.bookmyturf.service;
 
 import com.bookmyturf.dto.admin.AdminItem;
 import com.bookmyturf.dto.admin.AdminListResponse;
+import com.bookmyturf.dto.admin.AdminStaffListResponse;
+import com.bookmyturf.dto.admin.AdminUserListResponse;
 import com.bookmyturf.dto.admin.CreateAccountRequest;
 import com.bookmyturf.dto.admin.CreateAdminResponse;
 import com.bookmyturf.dto.admin.CreateStaffResponse;
@@ -15,6 +17,7 @@ import com.bookmyturf.dto.admin.SubCourtApprovalResponse;
 import com.bookmyturf.dto.admin.TurfApprovalResponse;
 import com.bookmyturf.dto.admin.UserStatusChangeResponse;
 import com.bookmyturf.model.AdminProfile;
+import com.bookmyturf.model.CustomerProfile;
 import com.bookmyturf.model.ListingStatus;
 import com.bookmyturf.model.Notification;
 import com.bookmyturf.model.OwnerProfile;
@@ -26,6 +29,7 @@ import com.bookmyturf.model.TurfPhoto;
 import com.bookmyturf.model.User;
 import com.bookmyturf.model.UserStatus;
 import com.bookmyturf.repository.AdminProfileRepository;
+import com.bookmyturf.repository.CustomerProfileRepository;
 import com.bookmyturf.repository.NotificationRepository;
 import com.bookmyturf.repository.OwnerProfileRepository;
 import com.bookmyturf.repository.StaffProfileRepository;
@@ -58,6 +62,7 @@ public class AdminService {
 
     private final UserRepository userRepository;
     private final AdminProfileRepository adminProfileRepository;
+    private final CustomerProfileRepository customerProfileRepository;
     private final StaffProfileRepository staffProfileRepository;
     private final OwnerProfileRepository ownerProfileRepository;
     private final TurfRepository turfRepository;
@@ -69,6 +74,7 @@ public class AdminService {
 
     public AdminService(UserRepository userRepository,
                         AdminProfileRepository adminProfileRepository,
+                        CustomerProfileRepository customerProfileRepository,
                         StaffProfileRepository staffProfileRepository,
                         OwnerProfileRepository ownerProfileRepository,
                         TurfRepository turfRepository,
@@ -79,6 +85,7 @@ public class AdminService {
                         ObjectMapper objectMapper) {
         this.userRepository = userRepository;
         this.adminProfileRepository = adminProfileRepository;
+        this.customerProfileRepository = customerProfileRepository;
         this.staffProfileRepository = staffProfileRepository;
         this.ownerProfileRepository = ownerProfileRepository;
         this.turfRepository = turfRepository;
@@ -286,15 +293,92 @@ public class AdminService {
         if (target.getStatus() == UserStatus.ACTIVE) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "User already active");
         }
-        if (target.getStatus() == UserStatus.BANNED) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Banned users cannot be reactivated");
-        }
 
         UserStatus previous = target.getStatus();
         target.setStatus(UserStatus.ACTIVE);
         userRepository.save(target);
         // reason accepted but not persisted (no audit table in v1)
         return new UserStatusChangeResponse(targetId, "ACTIVE", previous.name());
+    }
+
+    // -------------------------------------------------------------------------
+    // User list (with role / status / search filters)
+    // -------------------------------------------------------------------------
+
+    public AdminUserListResponse listUsers(String roleStr, String statusStr, String search, int page, int pageSize) {
+        if (pageSize > 100) pageSize = 100;
+        if (page < 1) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid query parameter");
+
+        Role roleFilter   = roleStr   != null && !roleStr.isBlank()   ? Role.valueOf(roleStr.toUpperCase())             : null;
+        UserStatus stFilter = statusStr != null && !statusStr.isBlank() ? UserStatus.valueOf(statusStr.toUpperCase()) : null;
+        String term = search != null && !search.isBlank() ? search.trim().toLowerCase() : null;
+
+        List<User> all = userRepository.findAll(Sort.by(Sort.Direction.DESC, "createdAt"));
+
+        List<AdminUserListResponse.UserItem> items = new ArrayList<>();
+        for (User u : all) {
+            if (roleFilter != null && u.getRole() != roleFilter) continue;
+            if (stFilter  != null && u.getStatus() != stFilter)  continue;
+
+            String name = resolveUserName(u);
+
+            if (term != null) {
+                boolean matchEmail = u.getEmail().toLowerCase().contains(term);
+                boolean matchName  = name.toLowerCase().contains(term);
+                if (!matchEmail && !matchName) continue;
+            }
+
+            items.add(new AdminUserListResponse.UserItem(
+                    u.getId(), name, u.getEmail(), u.getPhone(),
+                    u.getRole().name(), u.getStatus().name(),
+                    u.getCreatedAt() != null ? u.getCreatedAt().toString() : null));
+        }
+
+        long totalResults = items.size();
+        int totalPages = (int) Math.ceil((double) totalResults / pageSize);
+        int from = (page - 1) * pageSize;
+        int to   = Math.min(from + pageSize, items.size());
+        List<AdminUserListResponse.UserItem> pageItems = from >= items.size() ? List.of() : items.subList(from, to);
+
+        return new AdminUserListResponse(page, pageSize, totalResults, Math.max(totalPages, 1), pageItems);
+    }
+
+    // -------------------------------------------------------------------------
+    // Staff list
+    // -------------------------------------------------------------------------
+
+    public AdminStaffListResponse listStaff(int page, int pageSize) {
+        if (pageSize > 100) pageSize = 100;
+        if (page < 1) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid query parameter");
+
+        List<User> allStaff = userRepository.findAll(Sort.by(Sort.Direction.DESC, "createdAt"))
+                .stream().filter(u -> u.getRole() == Role.STAFF).collect(Collectors.toList());
+
+        List<AdminStaffListResponse.StaffItem> items = allStaff.stream().map(u -> {
+            StaffProfile sp = staffProfileRepository.findById(u.getId()).orElse(null);
+            String name = sp != null ? sp.getName() : "";
+            return new AdminStaffListResponse.StaffItem(
+                    u.getId(), name, u.getEmail(), u.getPhone(),
+                    u.getStatus().name(),
+                    u.getCreatedAt() != null ? u.getCreatedAt().toString() : null);
+        }).collect(Collectors.toList());
+
+        long totalResults = items.size();
+        int totalPages = (int) Math.ceil((double) totalResults / pageSize);
+        int from = (page - 1) * pageSize;
+        int to   = Math.min(from + pageSize, items.size());
+        List<AdminStaffListResponse.StaffItem> pageItems = from >= items.size() ? List.of() : items.subList(from, to);
+
+        return new AdminStaffListResponse(page, pageSize, totalResults, Math.max(totalPages, 1), pageItems);
+    }
+
+    private String resolveUserName(User u) {
+        return switch (u.getRole()) {
+            case CUSTOMER -> customerProfileRepository.findById(u.getId()).map(cp -> cp.getName()).orElse("");
+            case OWNER    -> ownerProfileRepository.findById(u.getId()).map(op -> op.getName()).orElse("");
+            case STAFF    -> staffProfileRepository.findById(u.getId()).map(sp -> sp.getName()).orElse("");
+            case ADMIN    -> adminProfileRepository.findById(u.getId()).map(ap -> ap.getName()).orElse("");
+        };
     }
 
     // -------------------------------------------------------------------------

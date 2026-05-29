@@ -92,7 +92,7 @@ public class QueryController {
     public ResponseEntity<AdminQueryListResponse> listAdminQueries(
             @RequestParam(required = false) String status,
             @RequestParam(defaultValue = "1") int page,
-            @RequestParam(defaultValue = "10") int pageSize) {
+            @RequestParam(name = "page_size", defaultValue = "10") int pageSize) {
         return ResponseEntity.ok(queryService.listAdminQueries(status, page, pageSize));
     }
 
