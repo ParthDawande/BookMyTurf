@@ -1,5 +1,7 @@
 package com.bookmyturf.controller;
 
+import com.bookmyturf.dto.customer.AvailabilityResponse;
+import com.bookmyturf.dto.customer.CustomerTurfDetailResponse;
 import com.bookmyturf.dto.publicapi.*;
 import com.bookmyturf.service.PublicService;
 import org.springframework.http.ResponseEntity;
@@ -20,6 +22,18 @@ public class PublicController {
     @GetMapping("/cities")
     public ResponseEntity<CitiesResponse> getCities() {
         return ResponseEntity.ok(publicService.getCities());
+    }
+
+    @GetMapping("/turfs/{id}")
+    public ResponseEntity<CustomerTurfDetailResponse> getTurf(@PathVariable Long id) {
+        return ResponseEntity.ok(publicService.getTurfDetail(id));
+    }
+
+    @GetMapping("/turfs/{id}/availability")
+    public ResponseEntity<AvailabilityResponse> getAvailability(
+            @PathVariable Long id,
+            @RequestParam String date) {
+        return ResponseEntity.ok(publicService.getAvailability(id, date));
     }
 
     @GetMapping("/turfs")

@@ -9,14 +9,20 @@ import CustomerHome from './pages/CustomerHome';
 import OwnerHome    from './pages/OwnerHome';
 import AdminHome    from './pages/AdminHome';
 import StaffHome    from './pages/StaffHome';
+import TurfList     from './pages/TurfList';
+import TurfDetail   from './pages/TurfDetail';
 
 export default function App() {
   return (
     <AuthProvider>
       <Routes>
-        <Route path="/"         element={<Landing />} />
-        <Route path="/login"    element={<Login />} />
-        <Route path="/register" element={<Register />} />
+        <Route path="/"           element={<Landing />} />
+        <Route path="/login"      element={<Login />} />
+        <Route path="/register"   element={<Register />} />
+
+        {/* Public browse — no auth required for list; detail requires CUSTOMER auth for full content */}
+        <Route path="/turfs"      element={<TurfList />} />
+        <Route path="/turfs/:id"  element={<TurfDetail />} />
 
         <Route path="/customer/*" element={
           <RoleGuard role="CUSTOMER"><CustomerHome /></RoleGuard>
