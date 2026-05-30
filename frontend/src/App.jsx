@@ -60,6 +60,9 @@ export default function App() {
         <Route path="/turfs"      element={<TurfList />} />
         <Route path="/turfs/:id"  element={<TurfDetail />} />
 
+        {/* Customer — /customer redirects to /customer/bookings */}
+        <Route path="/customer" element={<Navigate to="/customer/bookings" replace />} />
+
         {/* Customer — specific routes before wildcard */}
         <Route path="/customer/bookings"                element={<CG><MyBookings /></CG>} />
         <Route path="/customer/bookings/:id/reschedule" element={<CG><ReschedulePage /></CG>} />
