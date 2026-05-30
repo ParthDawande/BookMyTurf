@@ -15,6 +15,10 @@ backend/.env
 frontend/.env
 application-local.properties
 
+# Runtime / build logs
+backend/*.log
+*.log
+
 # IDE / OS
 .idea/
 *.iml
